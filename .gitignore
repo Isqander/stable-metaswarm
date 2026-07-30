@@ -1,0 +1,9 @@
+# Read-only reference clones of analysed projects.
+# Not submodules: throwaway shallow clones, restored by scripts/sync-refs.ps1
+# from refs/manifest.tsv (committed) at the SHAs in refs/pinned.tsv (committed).
+/refs/*
+!/refs/manifest.tsv
+!/refs/pinned.tsv
+
+# JetBrains
+/.idea/

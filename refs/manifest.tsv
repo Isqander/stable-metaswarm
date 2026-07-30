@@ -1,0 +1,20 @@
+# Reference clones for analysing the CLI-agent orchestrator landscape.
+# Sources: docs/researches/*.md ; all repos verified to exist on 2026-07-30.
+# Columns: dir<TAB>repo<TAB>tier<TAB>depth<TAB>why
+#   depth: "full" = complete history (small repos), "1" = shallow single-branch
+dir	repo	tier	depth	why
+metaswarm	dsifry/metaswarm	0	full	Методология SDLC, совпадающая с целевым флоу: design review gate, 5 параллельных ревьюеров, cap 3 + human escalation, adversarial review без anchoring. Источник промптов и рубрик.
+beads	gastownhall/beads	0	1	Граф задач (bd) как source of truth. Ключевой вопрос — схема данных: хватает ли полей/связей под immutable attempts, revisions и human questions.
+gascity	gastownhall/gascity	0	1	Главный кандидат в durable control plane: Formula v2, control beads, durable waits, mol-review-quorum, external messaging fabric. Полный вес 1.7 GB — только shallow.
+orca-virtuslab	VirtusLab/orca	0	full	Scala/JVM библиотека программируемых flow. reviewAndFixLoop как first-class primitive, три режима контекста, resumable stages. Кандидат в быстрый прототип.
+bernstein	sipyourdrink-ltd/bernstein	1	1	Детерминированный Python DAG-движок: fresh_context, 40+ CLI-адаптеров, HMAC-ledger и replay. Референс N1 по вопросу «как запускать любой CLI».
+cao	awslabs/cli-agent-orchestrator	1	1	Мульти-вендорный запуск CLI: supervisor/worker, tmux-изоляция, MCP, plugins для outbound events. Второй взгляд на слой адаптеров + проверка противоречия про Telegram.
+conductor-ms	microsoft/conductor	1	full	YAML-DSL как готовый язык описания пайплайна: context modes (accumulate/last_only/explicit), human_gate, max_iterations, parallel-группы.
+gastown	gastownhall/gastown	1	1	Образцовый pack поверх gascity: роли (Mayor/Polecats/Refinery/Witness), gt escalate с severity, merge-queue с верификационными гейтами.
+agentapi	coder/agentapi	2	full	Универсальный HTTP-адаптер над CLI-агентами (SSE /events, /message, /status). Дешёвая альтернатива своим враперам. Last push 2026-05-27 — подстыл.
+humanlayer	humanlayer/humanlayer	2	1	Durable HITL: approval-гейты, роутинг к людям, таймауты, вебхуки. CodeLayer как пример демона поверх Claude Code.
+tutti	tutti-os/tutti	2	1	ACP (Agent Client Protocol) как стандарт подключения агентов — альтернатива tmux/subprocess. Живой, в орге отдельные extension-репо под Qwen/Gemini/Grok/CodeBuddy.
+stoneforge	stoneforge-ai/stoneforge	2	1	Event-sourced control plane: Tasks/Plans/Documents, dependency graph, worktrees, recovery, merge steward.
+forge	ForgeAILab/forge	2	1	Готовый self-hosted control plane в одном бинарнике: worktree на задачу, CI gate, reviewer role, human approval, audit log, REST/MCP/CLI/web UI. Риск: 43 звезды, public beta 0.1.x.
+orca-stably	stablyai/orca	2	1	Operator IDE поверх любых CLI: worktree, SSH, terminal UI, browser/computer use, mobile notifications. Смотреть только как источник UI-паттернов.
+vibe-kanban	BloopAI/vibe-kanban	2	1	Каталог CLI-адаптеров (10+ агентов) в Rust. Last push 2026-04-24 — Bloop закрылась, community-maintained. Ценность только в адаптерах.
