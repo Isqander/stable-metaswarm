@@ -492,6 +492,17 @@ SELECT c.id AS campaign_id,
 FROM review_campaign c;
 ```
 
+**Круг `discovery` считается первой проверкой** — на этом стоит вся арифметика
+«три правки, четыре проверки». Первичный кворум, нашедший замечания, закрывается
+с `result = 'needs_revision'` и попадает в `review_check_count` наравне с
+кругами `fix_check`. Дальше: правка 1 → проверка 2 → правка 2 → проверка 3 →
+правка 3 → проверка 4. Если бы discovery не считался, четвёртая проверка
+оказалась бы пятой, и кап поехал бы на единицу — та самая ошибка, от которой
+защищает таблица переходов в `decision.md` §7.1.
+
+Разница между `discovery` и `fix_check` только в наличии
+`preceding_revision_id`: у первого его нет, потому что правки ещё не было.
+
 Инвариант 5 («оба растут только после `succeeded`») держится **структурой** для
 левого счётчика и **кодом** для правого, и эту асимметрию надо назвать честно.
 
@@ -587,6 +598,26 @@ END;
 
 **`CHECK ((severity_suggested IS NULL) <> (unchanged_from_id IS NULL))`** — это
 инвариант 8 целиком, на уровне базы. Наблюдение без обоих полей не вставляется.
+
+**`dedup_key` — только внутри круга, и ошибается он в безопасную сторону.**
+Состав ключа взят у Gas City (`severity + title + body + file + start + end`,
+нормализованные), но обосновывать его надо не происхождением, а направлением
+ошибки:
+
+| Ошибка ключа | Что происходит | Цена |
+|---|---|---|
+| **Промах** — две линии описали одну проблему разными словами | Обе записи уходят reconciliation-агенту, он их сгруппирует | Ноль: это и есть его работа |
+| **Ложное слияние** — разные проблемы совпали по ключу | Одно замечание вместо двух, вторая проблема исчезает | Высокая, но требует почти дословного совпадения `title` **и** `body` у двух независимых линий в одном круге на одной ревизии |
+
+То есть ключ работает как дешёвый префильтр перед моделью, а не как механизм
+установления личности. Личность выдаёт рантайм, и это разные вещи: ключ живёт
+внутри одного круга и никогда не используется между кругами — именно там он и
+ломается, потому что после правки автора номера строк сдвигаются.
+
+Отсюда правило разрешения сомнений то же, что у reconciliation: **при
+неоднозначности лучше два замечания, чем одно.** И два приёмочных теста:
+дословное совпадение склеивается ключом; разные формулировки одной проблемы
+ключом не склеиваются, а доходят до reconciliation.
 
 **Обратная ссылка `unchanged_from` проверяется триггером, а не CHECK:** CHECK
 видит только собственную строку и не может сравнить с другой.
@@ -911,6 +942,8 @@ event 30  reopening
 | `first_seen(10)`, `accepted_reason(20)`, `reopening(30)` | 10 | Прежний период продолжается |
 | `first_seen(10)`, `verified(20)`, `reopening(30)`, `accepted(40)`, `reopening(50)` | 30 | Период от переоткрытия, отказ его не сдвигает |
 | `first_seen(10)`, `verified_fixed(20)` | NULL | Период закрыт |
+| `first_seen critical(10)`, `override→medium(20)`, `recurrence low(30)` | 10 | Период тот же, но `escalation_severity` = `medium`: наблюдения до override отсечены |
+| то же плюс `recurrence high(40)` | 10 | `escalation_severity` = `high`: после override накопитель снова растёт |
 
 **Открыт finding или закрыт — это другой вопрос, и на него отвечает другое
 представление.** Смешивать их нельзя: `accepted_reason` закрывает замечание, но
@@ -953,26 +986,60 @@ finding после принятого отказа — `closed`, а его пе�
 ссылку на закрытое как на открытое, либо потерять накопитель.
 
 ```sql
+-- Последний override внутри текущего периода, если он есть.
+CREATE VIEW finding_last_override AS
+SELECT v.finding_id, v.new_severity, v.event_id
+  FROM severity_override v
+  JOIN finding_period p ON p.finding_id = v.finding_id
+ WHERE p.period_start_event_id IS NOT NULL
+   AND v.event_id >= p.period_start_event_id
+   AND v.event_id = (SELECT MAX(v2.event_id) FROM severity_override v2
+                      WHERE v2.finding_id = v.finding_id
+                        AND v2.event_id >= p.period_start_event_id);
+
 CREATE VIEW finding_severity AS
 SELECT f.id AS finding_id,
        p.period_start_event_id,
        -- Только порог эскалации читает это значение.
-       (SELECT s.severity FROM finding_observation_link l
-          JOIN review_observation o  ON o.id = l.observation_id
-          JOIN severity_scale     s  ON s.severity = o.severity_effective
-         WHERE l.finding_id = f.id
-           AND p.period_start_event_id IS NOT NULL
-           AND l.event_id >= p.period_start_event_id
-           AND l.link_type IN ('first_seen','recurrence','reopening')
-         ORDER BY s.rank DESC LIMIT 1)              AS escalation_severity,
-       -- Только CLI, как диагноз занижения.
+       -- Отсечка: наблюдения ДО последнего override в счёт не идут,
+       -- иначе понижение человеком не срабатывает.
+       (SELECT s.severity FROM (
+            SELECT o.severity_effective AS sv
+              FROM finding_observation_link l
+              JOIN review_observation o ON o.id = l.observation_id
+             WHERE l.finding_id = f.id
+               AND p.period_start_event_id IS NOT NULL
+               AND l.event_id >= p.period_start_event_id
+               AND l.event_id >  COALESCE(ov.event_id, -1)
+               AND l.link_type IN ('first_seen','recurrence','reopening')
+            UNION ALL
+            SELECT ov.new_severity WHERE ov.new_severity IS NOT NULL
+          ) JOIN severity_scale s ON s.severity = sv
+          ORDER BY s.rank DESC LIMIT 1)             AS escalation_severity,
+       -- Только CLI, как диагноз занижения. Override не учитывает намеренно.
        (SELECT s.severity FROM finding_observation_link l
           JOIN review_observation o ON o.id = l.observation_id
           JOIN severity_scale     s ON s.severity = o.severity_effective
          WHERE l.finding_id = f.id
          ORDER BY s.rank DESC LIMIT 1)              AS historical_max
-  FROM finding f JOIN finding_period p ON p.finding_id = f.id;
+  FROM finding f
+  JOIN finding_period p        ON p.finding_id = f.id
+  LEFT JOIN finding_last_override ov ON ov.finding_id = f.id;
 ```
+
+**Про отсечку по `event_id` последнего override.** Правило `decision.md` §6.3 —
+`max(override, наблюдения после override)`, и слово «после» несущее. Первая
+редакция описывала реализацию как «ещё одна ветка `UNION`»: она добавляла
+override в пул максимума, но **не отсекала прежние наблюдения**. Результат —
+человек понижает `critical → medium`, а старое `critical`-наблюдение остаётся в
+`MAX`, и понижение не срабатывает вовсе. Проверено: на последовательности
+`critical@10 → override medium@20 → low@30` набросок возвращает `critical`,
+правильная формула — `medium`; после `high@40` обе дают `high`.
+
+Это тот же класс ошибки, что `MAX`/`MIN` выше: правило было сформулировано
+верно и потеряно при переводе в SQL. Понижение человеком — единственный
+разрешённый путь вниз (`decision.md` §6.3), поэтому путь живой, а не
+теоретический.
 
 Четыре следствия, которые стоит проверить глазами по таблице границ из
 `decision.md` §6.3:
@@ -988,8 +1055,9 @@ SELECT f.id AS finding_id,
   отказа круга не порождает и severity не двигает.
 
 Монотонность вверх (инвариант 9) получается сама: `MAX` не убывает при
-добавлении наблюдений, а понижение возможно только сменой периода, то есть через
-закрывающее событие.
+добавлении наблюдений. Понижений ровно два, и оба явные: смена периода
+(закрывающее событие) и `severity_override` человеком. Автоматического понижения
+не существует ни одним путём.
 
 ```sql
 -- Единственная мутация severity, не рождённая из наблюдения.
@@ -1006,9 +1074,14 @@ CREATE TABLE severity_override (
 ```
 
 Override не закрывает период (`decision.md` §6.3), дальше действует
-`max(override, наблюдения после override)`. В `finding_severity` это добавляется
-как ещё одна ветка `UNION` с фильтром `event_id >= period_start`; вынесено из
-основного вью только ради читаемости — в реализации это одна строка.
+`max(override, наблюдения после override)` — реализовано отсечкой по
+`event_id` в `finding_severity` выше, а не простым добавлением в пул максимума.
+
+`historical_max` override **не учитывает намеренно**: его смысл — «какая
+серьёзность вообще наблюдалась за всю жизнь ID», и решение человека сюда не
+относится. Именно поэтому расхождение между `escalation_severity` и
+`historical_max` в CLI читается как диагноз: либо систематическое занижение
+ревьюерами, либо след ручного понижения — и оба случая стоит увидеть.
 
 ### 5.7. Свежесть ревьюера
 
@@ -1060,6 +1133,43 @@ CREATE TABLE run_profile_resolution (
   PRIMARY KEY (run_id, profile_id)
 );
 ```
+
+**Автор ревизии не может быть её ревьюером — и это отдельное правило, а не
+следствие свежести.** `reviewer_exposure` фиксирует только тех, кто проверял;
+пара provider+model, написавшая ревизию, в неё не попадает, и технически ничто
+не мешает назначить ту же модель линией её проверки. А это требование №5 из
+исходных требований — «А сделал, Б проверил» — того же класса, что свежесть, и
+держаться на аккуратности конфига оно не должно.
+
+Записывается тем же способом, что экспозиция: у каждой авторской попытки есть
+`profile_id`, а фактическая пара берётся из `run_profile_resolution`. Проверок
+две, в разных местах:
+
+```sql
+-- 1. Отбор линий на круг проверки: исключить пару, авторившую эту ревизию.
+SELECT r.provider, r.model
+  FROM run_profile_resolution r
+ WHERE r.run_id = :run_id
+   AND (r.provider, r.model) NOT IN (
+         SELECT rp.provider, rp.model
+           FROM author_revision ar
+           JOIN step_attempt a          ON a.id = ar.attempt_id
+           JOIN run_profile_resolution rp
+                ON rp.run_id = :run_id AND rp.profile_id = a.profile_id
+          WHERE ar.id = :preceding_revision_id)
+   AND (r.provider, r.model) NOT IN (SELECT provider, model FROM reviewer_exposure
+                                      WHERE /* по freshness_scope */);
+```
+
+2. **Валидация конфига флоу:** профили, назначенные ролям автора и ревьюера
+одной стадии, не должны резолвиться в одну фактическую пару. Это ловится до
+запуска прогона и падает как ошибка конфига, а не как contract error на середине
+кампании — там уже поздно, кворум набран.
+
+Вторая проверка обязательна именно из-за трёх claude-профилей: `claude`,
+`claude-m` и `claude-z` — один бинарь, и если два из них случайно окажутся на
+одном бэкенде, «автор и ревьюер» станут одной моделью, а по именам профилей это
+будет неотличимо.
 
 **Область свежести — параметр стадии, а не константа.** `decision.md` даёт два
 разных требования: §7.3 говорит «система знает, кто уже видел **эту ревизию**», а
@@ -1243,6 +1353,8 @@ CREATE TABLE human_question (
   reason        TEXT    NOT NULL,      -- cap_exhausted_same | cap_exhausted_new
                                        -- | dispute | contract_error | hang
                                        -- | baseline_red | approval_gate | open_question
+                                       -- | reopen_human_closed | reconcile_failed
+                                       -- | lane_failure | verification_policy
   question_text TEXT    NOT NULL,
   options_json  TEXT,                  -- NULL = вопрос без вариантов, это законно
   snapshot_json TEXT,                  -- severity, порог, версия политики на момент решения
@@ -1651,16 +1763,25 @@ immutable-записей и пересчёт всегда даст тот же �
 | Что | Чем оказалось | Как исправлено |
 |---|---|---|
 | `finding_period` брал `MAX` открывающего события | Переоткрытие после принятого отказа обнуляло накопитель severity — ровно та лазейка, против которой правило и написано | `MIN`; проверено на пяти последовательностях |
+| `severity_override` добавлялся в пул `MAX` без отсечки прежних наблюдений | Понижение человеком не срабатывало: старое `critical`-наблюдение оставалось в максимуме. Тот же класс шва, что `MAX`/`MIN` | Отсечка по `event_id` последнего override; проверено на трёх последовательностях |
+| Автор ревизии технически мог стать её ревьюером | `reviewer_exposure` фиксирует только проверявших; про писавшего правило молчало, хотя это прямо «А сделал — Б проверил» | Исключение пары автора при отборе линий + валидация конфига флоу |
 | `period_start IS NULL` трактовалось как «finding закрыт» | `accepted_reason` закрывает finding, но не период: одно представление не может отвечать на оба вопроса | Два представления: `finding_status` и `finding_period` |
 | CHECK совместимости пары в `finding_round` | При `disposition IS NULL` выражение давало NULL, а NULL в CHECK проходит: решение ревьюера по неотвеченному замечанию вставлялось | Явная проверка `disposition IS NOT NULL` внутри |
 | CHECK-и в `finding_resolution` через `CASE` без `ELSE`, без FK на справочник | Неизвестное значение `resolution` давало NULL и обходило обе проверки, включая флаг закрытия периода | Справочник `resolution_kind` + FK + `ELSE` |
 | `author_revision.attempt_id` — простой FK | Ссылка на попытку ревьюера или на `failed` не отвергалась; инвариант 5 держал код, а не база | Составные FK по `(id, role)` и `(id, outcome)` + CHECK |
 | `severity_effective` при `unchanged_from` ничем не проверялась | Денормализация превращалась в третий путь записи severity | Триггер сравнивает с родительским значением |
 
-Первые четыре найдены внешним ревью, все воспроизведены вставкой в SQLite до
-внесения правок. Общий урок записан рядом с CHECK в §5.5: **в SQLite нарушением
-считается только FALSE, и любая колонка в сравнении должна быть либо `NOT NULL`,
-либо явно проверена внутри самого констрейнта.**
+Все найдены внешним ревью и воспроизведены исполнением до внесения правок. Два
+урока, которые стоит держать при дальнейшей работе:
+
+1. **В SQLite нарушением считается только FALSE.** Любая колонка в сравнении
+   должна быть либо `NOT NULL` в объявлении, либо явно проверена внутри самого
+   констрейнта; любой `CASE` в CHECK обязан иметь `ELSE`.
+2. **Правило, верно сформулированное текстом, ломается при переводе в SQL — и
+   это самый частый дефект здесь.** Три ошибки из шести именно такие: `MAX`
+   вместо `MIN`, отсутствие отсечки у override, одно представление вместо двух.
+   Ни одну из них не поймал бы тест чистой функции домена — они живут на шве.
+   Отсюда задача T1.7b в плане работ: вертикальный срез на настоящей базе.
 
 Отдельно стоит отметить, что **`run_event.id` получил вторую роль** — общего
 монотонного порядка, на котором стоит вычисление периода открытости. §6.3
