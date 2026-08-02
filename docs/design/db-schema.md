@@ -1,6 +1,11 @@
 # Схема состояния: SQLite
 
-Дата: 2026-08-02. Статус: первый проход, не проверено запуском.
+Дата: 2026-08-02. Статус: вторая редакция после внешнего ревью. Схема целиком
+как DDL не исполнялась; **несущие конструкции проверены вставкой** — составные FK
+`author_revision`, партиальный уникальный индекс активных попыток, партиальный
+индекс активной версии задачи, XOR-констрейнт наблюдения, триггер наследования
+severity, оба почищенных CHECK. Проверялось именно то, что они **отвергают**
+нарушение, а не только то, что синтаксис принимается.
 
 Реализация модели данных из `../metaResearches/decision.md` §5–§6 в конкретном
 DDL. Документ отвечает на вопрос, на который решение не отвечает: **что именно
@@ -136,7 +141,8 @@ review-домен     review_subject, review_campaign, review_lane, review_round
                  author_revision, review_observation, finding,
                  finding_observation_link, finding_round, finding_resolution,
                  severity_override, reviewer_exposure
-человек          human_question, human_answer, telegram_outbox, telegram_inbox
+человек          human_question, human_answer, notification_outbox,
+                 telegram_inbox, telegram_cursor
 артефакты        artifact_revision, artifact_approval, verification_run
 справочники      severity_scale, attempt_outcome, round_result, branch_state,
                  campaign_state, subject_kind, link_type, disposition,
@@ -423,20 +429,55 @@ CREATE TABLE review_round (
 );
 
 -- Строка появляется ТОЛЬКО когда правка состоялась: попытка succeeded и дала
--- новую ревизию. Это и есть счётчик.
+-- новую ревизию. Это и есть счётчик — и он защищён внешними ключами, а не
+-- только дисциплиной вызывающего кода.
 CREATE TABLE author_revision (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id          INTEGER NOT NULL REFERENCES review_campaign(id),
   revision_no          INTEGER NOT NULL,
-  attempt_id           INTEGER NOT NULL REFERENCES step_attempt(id),
+  attempt_id           INTEGER NOT NULL,
+  attempt_role         TEXT    NOT NULL,
+  attempt_outcome      TEXT    NOT NULL,
   input_sha            TEXT,
   output_sha           TEXT,
   artifact_revision_id INTEGER REFERENCES artifact_revision(id),
   completed_at         INTEGER NOT NULL,
   UNIQUE (campaign_id, revision_no),
-  UNIQUE (attempt_id)
+  UNIQUE (attempt_id),
+  CHECK (attempt_role = 'author'),
+  CHECK (attempt_outcome = 'succeeded'),
+  FOREIGN KEY (attempt_id, attempt_role)    REFERENCES step_attempt(id, role),
+  FOREIGN KEY (attempt_id, attempt_outcome) REFERENCES step_attempt(id, outcome)
 );
 ```
+
+Составные внешние ключи требуют в родительской таблице:
+
+```sql
+CREATE UNIQUE INDEX ux_attempt_id_role    ON step_attempt (id, role);
+CREATE UNIQUE INDEX ux_attempt_id_outcome ON step_attempt (id, outcome);
+```
+
+**Зачем эта конструкция.** Голый `attempt_id INTEGER REFERENCES step_attempt(id)`
+позволяет сослаться на попытку ревьюера или на попытку с исходом `failed` — и
+тогда инвариант 5 («счётчик растёт только после `succeeded` соответствующей
+роли») держится не базой, а надеждой на вызывающий код. С парой составных FK
+плюс двумя CHECK база проверяет и роль, и исход: вставить строку счётчика,
+ссылающуюся на неавторскую или незавершённую попытку, физически нельзя.
+Стоимость — два индекса и две денормализованные колонки, которые не могут
+разойтись с источником, потому что связаны внешним ключом.
+
+Порядок внутри транзакции при этом обязателен: сначала `UPDATE step_attempt SET
+outcome = 'succeeded'`, потом `INSERT INTO author_revision`. Обратный порядок
+отвергнет FK — что и требуется.
+
+**Строка `author_revision` — свершившийся факт, а не намерение.** Роль durable
+intent для checkpoint-коммита несёт сама запись `step_attempt`: она создаётся до
+запуска процесса, её `id` попадает в сообщение коммита, и по нему выполняется
+сверка при восстановлении. Разделение важно: если бы одна и та же строка была и
+намерением, и фактом, счётчик капа рос бы до того, как правка состоялась (при
+вставке до `git commit`) либо намерение не было бы durable (при вставке после).
+Подробнее — `architecture.md` §8.
 
 **Счётчики капа — это `COUNT(*)`, а не колонки.**
 
@@ -532,16 +573,28 @@ BEGIN
        AND p.campaign_id = NEW.campaign_id
        AND p.seq < NEW.seq
   );
+  -- Наследование обязано быть настоящим: эффективная severity равна
+  -- родительской, иначе "подтвердил прежнюю" молча меняет оценку.
+  SELECT RAISE(ABORT, 'severity_effective must equal parent severity_effective')
+  WHERE NEW.severity_effective <> (
+    SELECT p.severity_effective FROM review_observation p
+     WHERE p.id = NEW.unchanged_from_id
+  );
 END;
 ```
 
-Триггер закрывает «назад по времени» и «в пределах кампании». Два оставшихся
-условия — «того же finding'а» и «того же периода открытости» — на момент вставки
-наблюдения **проверить невозможно**: наблюдение существует раньше личности, и
-привязка к finding'у появляется только на reconciliation. Поэтому они
-проверяются кодом на этапе reconciliation, до записи связей, и нарушение даёт
-`contract_error` с отклонением всего вывода ревьюера. Это не ослабление: раньше
-момента reconciliation данных для проверки просто нет.
+Второй `RAISE` — не формальность. Без него вызывающий код может записать
+`unchanged_from` на мягкое наблюдение и любую `severity_effective` по своему
+усмотрению, и денормализация из бесплатной функции превращается в третий путь
+записи severity. Проверка стоит один индексированный SELECT на вставку.
+
+Триггер закрывает «назад по времени», «в пределах кампании» и корректность
+наследования. Два оставшихся условия — «того же finding'а» и «того же периода
+открытости» — на момент вставки наблюдения **проверить невозможно**: наблюдение
+существует раньше личности, и привязка к finding'у появляется только на
+reconciliation. Поэтому они проверяются кодом на этапе reconciliation, до записи
+связей, и нарушение даёт `contract_error` с отклонением всего вывода ревьюера.
+Это не ослабление: раньше момента reconciliation данных для проверки просто нет.
 
 **Где `unchanged_from` вообще возможен.** В фазе `blind_discovery` ревьюер не
 видит ledger и не знает ID прежних наблюдений — сослаться ему не на что, и любое
@@ -654,32 +707,59 @@ CREATE TABLE finding_round (
   -- Отказ обязан быть обоснован.
   CHECK (disposition NOT IN ('rejected','wont_fix') OR disposition_reason IS NOT NULL),
   -- Инвариант 10: исход ревьюера совместим с disposition автора.
+  -- disposition IS NOT NULL внутри — обязательно, см. ниже про NULL в CHECK.
   CHECK (
     reviewer_decision IS NULL
-    OR (disposition = 'fixed'
-        AND reviewer_decision IN ('verified_fixed','still_present'))
-    OR (disposition IN ('rejected','wont_fix')
-        AND reviewer_decision IN ('accepted_reason','insists'))
+    OR (disposition IS NOT NULL AND (
+           (disposition = 'fixed'
+            AND reviewer_decision IN ('verified_fixed','still_present'))
+        OR (disposition IN ('rejected','wont_fix')
+            AND reviewer_decision IN ('accepted_reason','insists'))))
   )
 );
 
 CREATE INDEX ix_finding_round_finding ON finding_round (finding_id);
 ```
 
-Совместимость пары — не проверка в сервисе, а CHECK. Инвариант 21
-(`UNIQUE(campaign_id, finding_id, round_no)`) — тоже. Инвариант 11 («решение
-выносит владелец этого круга, и оно единственное») держится тем, что
-`reviewer_decision` — одна колонка одной строки: второго решения записать некуда.
+**Про `disposition IS NOT NULL` внутри CHECK — это не избыточность, а починка
+дыры.** SQLite считает нарушением только результат FALSE; **NULL проходит**.
+Первая редакция этого CHECK без явной проверки на NULL пропускала строку
+`disposition = NULL, reviewer_decision = 'insists'`: сравнение `NULL = 'fixed'`
+даёт NULL, `NULL AND TRUE` даёт NULL, и всё выражение становится NULL. То есть
+ревьюер мог вынести решение по замечанию, на которое автор не ответил — ровно
+то, что инвариант 10 должен запрещать. Проверено вставкой: без `IS NOT NULL`
+строка вставляется, с ним — отвергается.
+
+Правило, которое стоит держать при написании любого CHECK в этой схеме:
+**каждая колонка, участвующая в сравнении, должна быть либо `NOT NULL` в
+объявлении, либо явно проверена на NULL внутри самого CHECK.** Иначе констрейнт
+молча превращается в декорацию именно на тех строках, ради которых написан.
+
+Инвариант 21 (`UNIQUE(campaign_id, finding_id, round_no)`) держится напрямую.
+Инвариант 11 («решение выносит владелец круга, и оно единственное») — тем, что
+`reviewer_decision` одна колонка одной строки: второго решения записать некуда.
 Код при этом обязан проверить, что `reviewer_attempt_id` принадлежит линии
 `owner_lane_id` — это констрейнтом не выражается, потому что требует join.
 
 ```sql
+-- Справочник обязателен: без FK неизвестное значение resolution проваливает
+-- CASE в NULL, и оба CHECK ниже перестают что-либо проверять.
+CREATE TABLE resolution_kind (
+  resolution           TEXT PRIMARY KEY,
+  resolution_authority TEXT NOT NULL REFERENCES resolution_authority(value),
+  closes_period        INTEGER NOT NULL
+);
+INSERT INTO resolution_kind VALUES
+  ('verified_fixed',  'reviewer', 1),
+  ('accepted_reason', 'reviewer', 0),
+  ('policy_closed',   'policy',   0),
+  ('human_decision',  'human',    1);
+
 CREATE TABLE finding_resolution (
   id                     INTEGER PRIMARY KEY AUTOINCREMENT,
   finding_id             INTEGER NOT NULL REFERENCES finding(id),
   seq                    INTEGER NOT NULL,
-  resolution             TEXT    NOT NULL,   -- verified_fixed | accepted_reason
-                                             -- | policy_closed | human_decision
+  resolution             TEXT    NOT NULL REFERENCES resolution_kind(resolution),
   resolution_authority   TEXT    NOT NULL REFERENCES resolution_authority(value),
   campaign_id            INTEGER NOT NULL REFERENCES review_campaign(id),
   round_no               INTEGER,
@@ -689,16 +769,20 @@ CREATE TABLE finding_resolution (
   created_at             INTEGER NOT NULL,
   UNIQUE (finding_id, seq),
   -- Кто закрыл — однозначно следует из того, чем закрыли.
+  -- ELSE обязателен: без него неизвестное значение даёт NULL, а NULL проходит.
   CHECK (resolution_authority = CASE resolution
            WHEN 'verified_fixed'  THEN 'reviewer'
            WHEN 'accepted_reason' THEN 'reviewer'
            WHEN 'policy_closed'   THEN 'policy'
-           WHEN 'human_decision'  THEN 'human' END),
+           WHEN 'human_decision'  THEN 'human'
+           ELSE '<invalid>' END),
   -- Период закрывают только два исхода из четырёх.
   CHECK (closes_severity_period = CASE resolution
            WHEN 'verified_fixed' THEN 1
            WHEN 'human_decision' THEN 1
-           ELSE 0 END),
+           WHEN 'accepted_reason' THEN 0
+           WHEN 'policy_closed'  THEN 0
+           ELSE -1 END),
   CHECK ((resolution = 'human_decision') = (human_answer_id IS NOT NULL))
 );
 
@@ -722,6 +806,19 @@ policy-closure период не закрывают, а `verified_fixed` и ре
 `resolution_authority` тоже выводится из `resolution` — и CHECK это фиксирует.
 Значит инвариант 13 («у каждого закрытия записан authority») не может быть
 нарушен рассинхронизацией: два поля не разъедутся.
+
+**Но всё это работает только вместе с FK на справочник и `ELSE` в `CASE`.** В
+первой редакции не было ни того, ни другого, и защита оказалась мнимой:
+`CASE 'bogus' WHEN … END` без `ELSE` возвращает NULL, сравнение с NULL даёт
+NULL, а NULL в CHECK проходит. То есть строка с произвольным значением
+`resolution` вставлялась с любым `authority` и любым флагом периода — включая
+`accepted_reason`-подобное закрытие с `closes_severity_period = 1`, ту самую
+лазейку, которую констрейнт должен был сделать неисполнимой. Проверено вставкой:
+без `ELSE` строка проходит, с `ELSE` отвергается.
+
+Здесь три слоя, и нужны все: FK не даёт написать неизвестное значение, `ELSE`
+ловит случай, если FK окажется выключен (`PRAGMA foreign_keys` — свойство
+соединения, а не файла), справочник хранит соответствие в одном месте.
 
 ### 5.6. Период открытости и три величины severity
 
@@ -753,14 +850,77 @@ last_close AS (
     FROM finding f
 )
 SELECT f.id AS finding_id,
-       (SELECT MAX(o.ev) FROM opens o
+       -- MIN, а не MAX: период начинается с ПЕРВОГО открывающего события
+       -- после последнего закрывающего.
+       (SELECT MIN(o.ev) FROM opens o
          WHERE o.finding_id = f.id AND o.ev > lc.ev) AS period_start_event_id
   FROM finding f JOIN last_close lc ON lc.finding_id = f.id;
 ```
 
-`period_start_event_id IS NULL` означает, что последнее закрывающее событие
-позже всех открывающих, то есть **замечание закрыто**. Отдельного флага
-«открыт/закрыт» не нужно, и он не может разойтись с реальностью.
+**`MIN`, а не `MAX` — и это ровно то место, где текстовое правило и SQL
+разошлись в первой редакции.** Разберём на примере, который ломает `MAX`:
+
+```
+event 10  first_seen
+event 20  accepted_reason   (closes_severity_period = 0)
+event 30  reopening
+```
+
+Принятый отказ период не закрывает, значит `last_close = 0`, а открывающих два:
+10 и 30. `MAX` вернул бы 30 — и наблюдение из события 10 выпало бы из
+накопителя, то есть переоткрытие после принятого отказа обнулило бы серьёзность.
+Это ровно та лазейка, ради закрытия которой правило и написано. `MIN` возвращает
+10: прежний период продолжается.
+
+Проверка на остальных случаях таблицы границ:
+
+| Последовательность | `MIN` | Правило `decision.md` §6.3 |
+|---|---|---|
+| `first_seen(10)` | 10 | Период с создания |
+| `first_seen(10)`, `verified_fixed(20)`, `reopening(30)` | 30 | Новый период, счёт с нуля |
+| `first_seen(10)`, `accepted_reason(20)`, `reopening(30)` | 10 | Прежний период продолжается |
+| `first_seen(10)`, `verified(20)`, `reopening(30)`, `accepted(40)`, `reopening(50)` | 30 | Период от переоткрытия, отказ его не сдвигает |
+| `first_seen(10)`, `verified_fixed(20)` | NULL | Период закрыт |
+
+**Открыт finding или закрыт — это другой вопрос, и на него отвечает другое
+представление.** Смешивать их нельзя: `accepted_reason` закрывает замечание, но
+намеренно **не** закрывает период накопления. `decision.md` §6.3 называет это
+«два разных жизненных цикла у одной записи», и в схеме они обязаны быть двумя
+объектами, иначе правило противоречит само себе.
+
+```sql
+CREATE VIEW finding_status AS
+SELECT f.id AS finding_id,
+       CASE WHEN last_res.ev IS NULL              THEN 'open'
+            WHEN last_open.ev > last_res.ev       THEN 'open'
+            ELSE 'closed' END                     AS status,
+       last_res.resolution                        AS last_resolution,
+       last_res.resolution_authority              AS last_authority
+  FROM finding f
+  LEFT JOIN (
+      SELECT r.finding_id, r.event_id AS ev, r.resolution, r.resolution_authority
+        FROM finding_resolution r
+       WHERE r.seq = (SELECT MAX(seq) FROM finding_resolution
+                       WHERE finding_id = r.finding_id)
+  ) last_res ON last_res.finding_id = f.id
+  LEFT JOIN (
+      SELECT finding_id, MAX(ev) AS ev FROM (
+          SELECT id AS finding_id, event_id AS ev FROM finding
+          UNION ALL
+          SELECT finding_id, event_id FROM finding_observation_link
+           WHERE link_type = 'reopening'
+      ) GROUP BY finding_id
+  ) last_open ON last_open.finding_id = f.id;
+```
+
+Здесь **любое** закрытие считается закрытием, включая `accepted_reason` и
+`policy_closed`, а открывающим считается последнее по времени открытие. Отсюда:
+finding после принятого отказа — `closed`, а его период накопления — открыт. Это
+не рассогласование, а именно то, что требуется.
+
+Валидация `existing_open` (инвариант 3) читает `finding_status`, вычисление
+порога эскалации — `finding_period`. Перепутать их — значит либо разрешить
+ссылку на закрытое как на открытое, либо потерять накопитель.
 
 ```sql
 CREATE VIEW finding_severity AS
@@ -835,23 +995,60 @@ CREATE TABLE reviewer_exposure (
   provider    TEXT    NOT NULL,
   model       TEXT    NOT NULL,
   campaign_id INTEGER NOT NULL REFERENCES review_campaign(id),
+  attempt_id  INTEGER NOT NULL REFERENCES step_attempt(id),
   created_at  INTEGER NOT NULL,
   UNIQUE (subject_id, revision, provider, model, campaign_id)
 );
 
 CREATE INDEX ix_exposure_lookup ON reviewer_exposure (subject_id, revision, provider, model);
+CREATE INDEX ix_exposure_subject ON reviewer_exposure (subject_id, provider, model);
 ```
 
 Ключ — **фактическая пара `provider` + `model`**, а не `profile_id`: у `claude-z`
 запрос `opus` возвращает `glm-5.2`, и по имени профиля свежесть не определяется.
-Запись создаётся при завершении попытки ревьюера, когда `actual_model` уже
-известен. Проверка при наборе линий новой кампании — один индексированный SELECT.
 
-Из этого же следует ограничение, которое лучше знать заранее: **если фактическая
-модель профиля совпала с уже отработавшей, профиль для новой кампании
-недоступен**, сколько бы разных имён профилей на неё ни ссылалось. Четыре
-обязательных профиля дают четыре пары — этого хватает на два кворума, но
-допущение из `decision.md` §15 стоит именно здесь.
+**Запись создаётся в момент передачи входа модели, а не при успешном
+завершении.** Ревьюер, который получил ревизию и вернул невалидный вывод, её уже
+видел: считать его свежим на следующей кампании нельзя, иначе `contract_error`
+превращается в способ обойти правило свежести — достаточно один раз ответить
+мусором. Поэтому строка пишется в той же транзакции, что и создание попытки, до
+`spawn`.
+
+Отсюда следует, что фактическая пара обязана быть **известна заранее**, а не
+получена из ответа. Она резолвится один раз при старте прогона (проверкой
+профиля) и хранится в `run_profile_resolution`; расхождение между разрешённой и
+фактической моделью в ответе — это дрейф либо contract error, а не повод
+отложить запись экспозиции.
+
+```sql
+CREATE TABLE run_profile_resolution (
+  run_id     INTEGER NOT NULL REFERENCES run(id),
+  profile_id TEXT    NOT NULL,
+  provider   TEXT    NOT NULL,
+  model      TEXT    NOT NULL,
+  resolved_at INTEGER NOT NULL,
+  PRIMARY KEY (run_id, profile_id)
+);
+```
+
+**Область свежести — параметр стадии, а не константа.** `decision.md` даёт два
+разных требования: §7.3 говорит «система знает, кто уже видел **эту ревизию**», а
+§11a про финальную кампанию — «заведомо свежий участник, **не участвовавший в
+предыдущих кругах**». Второе строже: на чистом пути без правок ревизия не
+менялась, и по правилу «эта ревизия» финальную кампанию нельзя закрыть никем из
+участников начальной, а по правилу «эта ревизия» — точнее, при смене ревизии —
+можно было бы вернуть прежнего. Разводим явно:
+
+| `freshness_scope` | Ключ проверки | Где применяется |
+|---|---|---|
+| `revision` | `(subject_id, revision, provider, model)` | Обычные кампании |
+| `subject` | `(subject_id, provider, model)` | Финальная кампания, второй кворум |
+
+Из этого следует ограничение, которое лучше знать заранее: **два профиля,
+резолвящиеся в одну фактическую модель, для правила свежести — один участник.**
+Четыре обязательных профиля дают четыре пары только если четыре бэкенда
+действительно разные; допущение `decision.md` §15 стоит именно здесь, и
+проверяется оно на шаге T0.3, а не после.
 
 ---
 
@@ -869,8 +1066,12 @@ CREATE TABLE task (
   carry_over_of    INTEGER REFERENCES task(id),
   created_at       INTEGER NOT NULL,
   closed_at        INTEGER,
-  UNIQUE (run_id, semantic_task_id)
+  UNIQUE (import_id, semantic_task_id)
 );
+
+-- Уникальность смыслового ID — среди АКТИВНЫХ версий задачи.
+CREATE UNIQUE INDEX ux_task_active_semantic
+  ON task (run_id, semantic_task_id) WHERE state <> 'invalidated';
 
 CREATE TABLE task_dependency (
   parent_task_id INTEGER NOT NULL REFERENCES task(id),
@@ -889,10 +1090,17 @@ CREATE TABLE task_graph_import (
 ```
 
 Инварианты 23 и 25 закрыты схемой: `PRIMARY KEY` даёт запрет дублей рёбер,
-`CHECK` — запрет self-edge, `UNIQUE(run_id, semantic_task_id)` — уникальность
-смысловых ID в пределах прогона (и заодно «личность задачи ограничена одним
-прогоном»). Ссылка на `import_id` в каждой задаче делает переимпорт видимым:
-задачи прежней ревизии инвалидируются, а не удаляются.
+`CHECK` — запрет self-edge. Ссылка на `import_id` в каждой задаче делает
+переимпорт видимым: задачи прежней ревизии инвалидируются, а не удаляются.
+
+**Про уникальность смыслового ID.** `decision.md` §6.2 требует
+`UNIQUE(run_id, semantic_task_id)`, но в паре с переимпортом это противоречие:
+инвалидированная задача `T3` прежней ревизии и новая `T3` текущей не могут
+сосуществовать, а именно этого требует «инвалидируются, а не удаляются».
+Разведено на две гарантии: `UNIQUE(import_id, semantic_task_id)` — внутри одного
+импорта ID уникален; партиальный `ux_task_active_semantic` — активная версия
+смыслового ID ровно одна. Вместе они дают ровно то, ради чего писался исходный
+инвариант, и при этом допускают историю. Уточнение зафиксировано в §14.
 
 **Ациклический граф — единственный инвариант, не выражаемый в SQLite
 декларативно.** Проверка делается кодом внутри той же транзакции, что и вставка
@@ -1034,21 +1242,24 @@ CREATE TABLE human_answer (
 вариантами.
 
 ```sql
-CREATE TABLE telegram_outbox (
+-- Транспортно-нейтрален: домен пишет сюда, не зная про Telegram.
+-- target_ref интерпретирует транспорт (chat_id для Telegram, NULL для CLI).
+CREATE TABLE notification_outbox (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id         INTEGER NOT NULL REFERENCES run(id),
   question_id    INTEGER REFERENCES human_question(id),
-  chat_id        INTEGER NOT NULL,
+  transport      TEXT    NOT NULL,          -- telegram | cli
+  target_ref     TEXT,
   body           TEXT    NOT NULL,
   reply_markup   TEXT,
   created_at     INTEGER NOT NULL,
   sent_at        INTEGER,
-  transport_message_id INTEGER,
+  transport_message_id TEXT,
   attempts       INTEGER NOT NULL DEFAULT 0,
   last_error     TEXT
 );
 
-CREATE INDEX ix_outbox_pending ON telegram_outbox (id) WHERE sent_at IS NULL;
+CREATE INDEX ix_outbox_pending ON notification_outbox (id) WHERE sent_at IS NULL;
 
 CREATE TABLE telegram_inbox (
   transport   TEXT    NOT NULL,
@@ -1068,6 +1279,13 @@ CREATE TABLE telegram_cursor (
 `PRIMARY KEY (transport, update_id)` — дубль update отвергается вставкой, а не
 проверкой. Порядок из `decision.md` §6.5 при этом обязателен: входящий update,
 ответ и отметка «обработано» пишутся одной транзакцией.
+
+Таблица входящих названа `telegram_inbox`, потому что идемпотентность по
+`update_id` — свойство именно Telegram Bot API; у CLI-транспорта входящего потока
+нет, ответ приходит прямой командой. Исходящая же сторона нейтральна: домен
+пишет в `notification_outbox`, ничего не зная о транспорте, и `transport = 'cli'`
+означает «лежит и ждёт команды `ask`». Это не заглушка — тот же путь, та же
+durable-запись, просто другой отправитель.
 
 ---
 
@@ -1185,17 +1403,17 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 |---|---|---|---|
 | 1 | Каждое открытое замечание закрыто явным статусом | **Код** | Проверка покрытия открытых ID до записи dispositions; круг не закрывается частично |
 | 2 | Наблюдение классифицировано ровно одним исходом | **База + код** | `finding_observation_link.observation_id` PK — не даст двух связей; полнота — запрос-проверка при закрытии reconciliation |
-| 3 | Ссылка на закрытый ID только в `reaffirmed_closed` / `reopen_closed` | **Код** | Валидация на приёме: `existing_open` на закрытый ID = contract error |
+| 3 | Ссылка на закрытый ID только в `reaffirmed_closed` / `reopen_closed` | **Код** | Валидация на приёме по `finding_status`: `existing_open` на закрытый ID = contract error |
 | 4 | Счётчиков два, независимы; настраивается только `max_author_revisions` | **База** | `campaign_counters` — представление; хранимых счётчиков нет, второй ручки нет |
-| 5 | Оба растут только после `succeeded` | **База** | Строка `author_revision` создаётся только по факту; `review_round.result` NULL до валидного вывода |
+| 5 | Оба растут только после `succeeded` | **База** | Составные FK `(attempt_id, role)` и `(attempt_id, outcome)` + два CHECK: сослаться на неавторскую или незавершённую попытку нельзя |
 | 6 | Кап проверяется в момент решения «продолжать ли» | **Код** | Единственная точка принятия решения в `review.transition`; проверка `review_check_count <= max_author_revisions + 1` — assert, а не гейт |
 | 7 | Личность выдаётся один раз | **База** | `finding.public_id` UNIQUE в прогоне; `first_observation_id` UNIQUE; пересчёта нет в коде |
-| 8 | Каждое наблюдение несёт `severity_suggested` либо `unchanged_from`; severity в enum; ссылка назад, без циклов | **База** | `CHECK ((a IS NULL) <> (b IS NULL))`, FK на `severity_scale`, триггер обратной ссылки; «тот же finding и период» — код на reconciliation |
+| 8 | Каждое наблюдение несёт `severity_suggested` либо `unchanged_from`; severity в enum; ссылка назад, без циклов | **База + код** | `CHECK ((a IS NULL) <> (b IS NULL))`, FK на `severity_scale`, триггер обратной ссылки и равенства унаследованной severity; «тот же finding и период» — код на reconciliation |
 | 9 | `escalation_severity` монотонна вверх | **База** | Вычисляется `MAX(rank)` по периоду; понизить нечего |
-| 10 | Исход ревьюера совместим с disposition | **База** | CHECK в `finding_round` |
+| 10 | Исход ревьюера совместим с disposition | **База** | CHECK в `finding_round` — **с явной проверкой `disposition IS NOT NULL`**, иначе NULL проходит |
 | 11 | Решение выносит владелец круга, оно единственное | **База + код** | Одна колонка `reviewer_decision`; принадлежность попытки владельцу — код |
 | 12 | Новая кампания не получает прежнюю сессию | **База + код** | `reviewer_exposure` + отбор линий по свободным парам provider+model |
-| 13 | У каждого закрытия записан `resolution_authority`; reopen следует ему | **База + код** | CHECK выводит authority из resolution; маршрутизация reopen — код |
+| 13 | У каждого закрытия записан `resolution_authority`; reopen следует ему | **База + код** | FK на `resolution_kind` + CHECK с `ELSE` выводят authority из resolution; маршрутизация reopen — код |
 | 14 | Переход и событие — одна транзакция | **Код** | Единственный writer, `store.transaction()` пишет событие вместе с переходом |
 | 15 | Все переходы §6.6 атомарны целиком | **Код** | Шесть именованных транзакционных операций, см. `architecture.md` §6 |
 | 16 | Ответ записан до снятия блокировки | **Код** | Порядок внутри одной транзакции |
@@ -1205,7 +1423,7 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 20 | Один принятый ответ; `UNIQUE(transport, update_id)` | **База** | `UNIQUE(question_id)` в `human_answer`; PK в `telegram_inbox` |
 | 21 | FK между кампанией, кругом, замечанием, наблюдением, попыткой; `UNIQUE(campaign_id, finding_id, round_no)` | **База** | FK и UNIQUE прямо в DDL |
 | 22 | Состояние `Run` вычисляется | **База** | `run_state` — представление; колонки состояния нет |
-| 23 | Нет self-edge, дублей, циклов | **База + код** | CHECK и PK; цикл — обход внутри той же транзакции |
+| 23 | Нет self-edge, дублей, циклов; смысловой ID уникален | **База + код** | CHECK и PK; `UNIQUE(import_id, semantic_task_id)` + партиальный индекс на активную версию; цикл — обход внутри той же транзакции |
 | 24 | Пустая готовность без блокировки = `invalid_graph` | **Код** | Запрос §9, выполняется планировщиком и recovery audit |
 | 25 | Запись в граф только атомарным импортом | **Код** | Единственный метод `task_graph.import_revision()`; прямых INSERT нет |
 | 26 | Секрет не появляется в промпте, событии, манифесте, артефакте; в транскрипт — после redaction | **Код** | Redaction до записи, allowlist переменных профиля |
@@ -1213,14 +1431,31 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 28 | Мутация ревьюера аннулирует результат | **Код** | Сверка tracked/untracked/index до и после; `mutation_violation` |
 | 29 | Прореживание меняет только файл заметок | **Код** | Шаг с явным allowlist путей, проверка diff перед коммитом |
 
-**Итог: 12 инвариантов из 29 держит база целиком, 5 — совместно, 12 — код.**
-Это и был главный вопрос к схеме, ради которого стоило начинать с неё.
+**Итог: 9 инвариантов из 29 держит база целиком, 6 — совместно с кодом, 1 —
+операционная система (`flock`), 1 — конфигурация, 12 — код.**
 
-Наблюдение, которое стоит записать: **все инварианты, оставшиеся за кодом, —
-это утверждения о полноте («каждое из множества покрыто») или о порядке
-операций.** Ни один из них не является утверждением об отдельной строке. Это
-разумная граница: реляционная схема хорошо держит форму записи и плохо — полноту
-множества.
+Первая редакция заявляла 12 / 5 / 12, и это было завышением: три из
+«гарантированных базой» констрейнтов на деле не работали (CHECK с трёхзначной
+логикой, `CASE` без `ELSE`, FK без проверки роли и исхода). После починки два
+из них действительно вернулись в базу, один остался совместным. Числа выше —
+после починки и после проверки вставкой, а не по описанию.
+
+Заодно снимается более сильный тезис первой редакции — «всё, что осталось за
+кодом, это только полнота множества или порядок операций». Он неверен: инварианты
+3, 26, 28 и 29 — обычные утверждения об отдельных фактах. Точнее так: **за кодом
+остаются три класса** —
+
+1. **полнота множества** — «каждое наблюдение классифицировано», «каждый
+   открытый ID покрыт» (1, 2, 24);
+2. **порядок и атомарность** — «событие в той же транзакции», «ответ до снятия
+   блокировки», «новая попытка после подтверждения смерти группы» (6, 14–17, 25);
+3. **сравнение с внешним миром или соседней таблицей** — «мутация ревьюера»
+   (git-дифф), «секрета нет в транскрипте» (содержимое файла), «ссылка только на
+   открытый ID» (join к представлению), «прореживание меняет только один файл»
+   (3, 26, 28, 29).
+
+Третий класс — самый неприятный: в нём ошибка не отвергается базой и проявляется
+не сразу. Именно на него должны идти приёмочные сценарии, а не на первые два.
 
 ---
 
@@ -1230,12 +1465,12 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 
 | Переход | Таблицы в одной транзакции |
 |---|---|
-| Задан вопрос человеку | `human_question` + `telegram_outbox` + `blocker` + `run_event` |
+| Задан вопрос человеку | `human_question` + `notification_outbox` + `blocker` + `run_event` |
 | Получен ответ | `telegram_inbox.handled_at` + `human_answer` + `blocker.cleared_at` + новый `blocker(awaiting_continue)` + `branch.state` + `run_event` |
 | Задача выполнена | `step_attempt.outcome` + `task.state='done'` + пересчёт готовности зависимых + `run_event` |
 | Круг ревью закрыт | Все `finding_round` круга + `review_round.result` + `review_campaign.state` + `finding_resolution` по закрытым + `run_event` |
 | Импорт графа | `task_graph_import` + `task` + `task_dependency` + инвалидация задач прежней ревизии + `run_event` |
-| Эскалация | `human_question(snapshot_json)` + `telegram_outbox` + `blocker` + `run_event` |
+| Эскалация | `human_question(snapshot_json)` + `notification_outbox` + `blocker` + `run_event` |
 
 Обратите внимание на второй: **на место снятой блокировки `human_question`
 ставится `awaiting_continue`** — в той же транзакции. Иначе между снятием одной
@@ -1349,6 +1584,46 @@ INSERT INTO blocker_kind(kind) VALUES
 immutable-записей и пересчёт всегда даст тот же результат. Выигрыш — вычисление
 порога эскалации становится индексированным `MAX(rank)` вместо рекурсивного CTE
 на каждом чтении.
+
+**6. Уникальность смыслового ID задачи — среди активных версий.** §6.2 требует
+`UNIQUE(run_id, semantic_task_id)` и одновременно «задачи прежней ревизии
+инвалидируются, а не удаляются». Это несовместимо: инвалидированная `T3` и новая
+`T3` не могут сосуществовать под таким ключом. Разведено на
+`UNIQUE(import_id, semantic_task_id)` плюс партиальный уникальный индекс на
+активную версию.
+
+**7. Область свежести ревьюера — параметр стадии.** §7.3 формулирует свежесть
+через ревизию («кто уже видел эту ревизию»), а §11a для финальной кампании —
+через участие («не участвовавший в предыдущих кругах»). Это разные правила, и на
+чистом пути без правок они расходятся: ревизия не менялась, поэтому по первому
+правилу финальную кампанию некем закрыть, а по второму — правило как раз и
+работает. Введён `freshness_scope` со значениями `revision` и `subject`; для
+финальной кампании и второго кворума — `subject`.
+
+**8. Экспозиция фиксируется при передаче входа, а не при успехе.** §7.3 не
+уточняет момент, и естественное прочтение — «когда узнали фактическую модель»,
+то есть после ответа. Это дыра: ревьюер, вернувший `contract_error`, ревизию уже
+видел, но остался бы «свежим». Значит фактическая пара provider+model обязана
+резолвиться заранее (`run_profile_resolution`), а расхождение с ответом
+трактуется как дрейф, а не как повод отложить запись.
+
+### Что было неверно в первой редакции этого документа
+
+Отдельно, потому что это ошибки дизайна, а не пропуски решения.
+
+| Что | Чем оказалось | Как исправлено |
+|---|---|---|
+| `finding_period` брал `MAX` открывающего события | Переоткрытие после принятого отказа обнуляло накопитель severity — ровно та лазейка, против которой правило и написано | `MIN`; проверено на пяти последовательностях |
+| `period_start IS NULL` трактовалось как «finding закрыт» | `accepted_reason` закрывает finding, но не период: одно представление не может отвечать на оба вопроса | Два представления: `finding_status` и `finding_period` |
+| CHECK совместимости пары в `finding_round` | При `disposition IS NULL` выражение давало NULL, а NULL в CHECK проходит: решение ревьюера по неотвеченному замечанию вставлялось | Явная проверка `disposition IS NOT NULL` внутри |
+| CHECK-и в `finding_resolution` через `CASE` без `ELSE`, без FK на справочник | Неизвестное значение `resolution` давало NULL и обходило обе проверки, включая флаг закрытия периода | Справочник `resolution_kind` + FK + `ELSE` |
+| `author_revision.attempt_id` — простой FK | Ссылка на попытку ревьюера или на `failed` не отвергалась; инвариант 5 держал код, а не база | Составные FK по `(id, role)` и `(id, outcome)` + CHECK |
+| `severity_effective` при `unchanged_from` ничем не проверялась | Денормализация превращалась в третий путь записи severity | Триггер сравнивает с родительским значением |
+
+Первые четыре найдены внешним ревью, все воспроизведены вставкой в SQLite до
+внесения правок. Общий урок записан рядом с CHECK в §5.5: **в SQLite нарушением
+считается только FALSE, и любая колонка в сравнении должна быть либо `NOT NULL`,
+либо явно проверена внутри самого констрейнта.**
 
 Отдельно стоит отметить, что **`run_event.id` получил вторую роль** — общего
 монотонного порядка, на котором стоит вычисление периода открытости. §6.3
