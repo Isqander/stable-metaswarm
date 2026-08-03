@@ -119,45 +119,59 @@ flowchart TB
 ### 3.1. Раскладка пакетов
 
 ```
-metaswarm/
-  cli/                 отдельный процесс: команды, рендер, клиент UDS
-  service/
-    app.py             composition root: сборка зависимостей, запуск задач
-    ipc.py             UDS сервер, протокол команд
-    scheduler.py       что запускать дальше
-    recovery.py        audit при старте
-    liveness.py        heartbeat, soft/hard timeout, убийство группы
-    lock.py            instance lock
-    readiness.py       проверка среды до приёма первого запроса
-  domain/
-    review/            протокол findings: кворум, reconciliation, severity, кап
-    graph/             task_graph: пять операций, атомарный импорт
-    human/             формирование вопроса, разбор ответа
-    flow/              модель флоу, стадии, роли, контекст
-  store/
-    db.py              PRAGMA, единый writer, транзакции
-    migrations/        NNNN_*.sql
-    repo/              по агрегатам: run, attempt, campaign, finding, question…
-    events.py          append-only журнал
-  agents/
-    profiles.py        профиль как данные: argv, env-маппинг, secret_ref
-    adapters/          claude.py, codex.py, cursor.py
-    runner.py          create_subprocess_exec, process group, kill
-    parse.py           разбор структурированного вывода
-    redaction.py       замена секретов до записи
-  effects/
-    git_service.py     разрешённые операции; запрещённых просто нет
-    artifacts.py       запись, манифест, digest
-    verification.py    политика argv + исполнение VerificationPlan
-    telegram/          poller.py, sender.py, api.py
-  config/
-    instance.py        instance profile: РабОрк / СвойОрк
-    project.py         конфиг проекта: рецепты, права на push
-    flow_loader.py     YAML + Pydantic extra="forbid"
-    canonical.py       канонический JSON и hash
-  obs/
-    logging.py, tree.py, transcripts.py
+src/
+  metaswarm/
+    cli/                 отдельный процесс: команды, рендер, клиент UDS
+    service/
+      app.py             composition root: сборка зависимостей, запуск задач
+      ipc.py             UDS сервер, протокол команд
+      scheduler.py       что запускать дальше
+      recovery.py        audit при старте
+      liveness.py        heartbeat, soft/hard timeout, убийство группы
+      lock.py            instance lock
+      readiness.py       проверка среды до приёма первого запроса
+    domain/
+      review/            протокол findings: кворум, reconciliation, severity, кап
+      graph/             task_graph: пять операций, атомарный импорт
+      human/             формирование вопроса, разбор ответа
+      flow/              модель флоу, стадии, роли, контекст
+    store/
+      db.py              PRAGMA, единый writer, транзакции
+      migrations/        NNNN_*.sql
+      repo/              по агрегатам: run, attempt, campaign, finding, question…
+      events.py          append-only журнал
+    agents/
+      profiles.py        профиль как данные: argv, env-маппинг, secret_ref
+      adapters/          claude.py, codex.py, cursor.py
+      runner.py          create_subprocess_exec, process group, kill
+      parse.py           разбор структурированного вывода
+      redaction.py       замена секретов до записи
+    effects/
+      git_service.py     разрешённые операции; запрещённых просто нет
+      artifacts.py       запись, манифест, digest
+      verification.py    политика argv + исполнение VerificationPlan
+      telegram/          poller.py, sender.py, api.py
+    config/
+      instance.py        instance profile: РабОрк / СвойОрк
+      project.py         конфиг проекта: рецепты, права на push
+      flow_loader.py     YAML + Pydantic extra="forbid"
+      canonical.py       канонический JSON и hash
+    obs/
+      logging.py, tree.py, transcripts.py
 ```
+
+Физическая раскладка — `src-layout`, а не flat layout. В `pyproject.toml`
+setuptools discovery дополнительно ограничивается `where = ["src"]` и
+`include = ["metaswarm*"]`: находящиеся рядом `fixtures/` и `refs/` не могут
+случайно стать namespace-пакетами. Импорт из корня checkout без установленного
+дистрибутива при этом не работает и не маскирует ошибку packaging.
+
+Общая dev-граница проекта — `pyproject.toml` + `uv.lock`. Задача, добавляющая
+или меняющая библиотеку, обновляет оба файла. Единственная точка локальной
+проверки — `./scripts/check.sh`; она запускает инструменты через
+`uv run --locked`, не переписывает устаревший lockfile и возвращает 127 при
+отсутствующем `uv`. Это tooling разработки: runtime и readiness сервиса от
+наличия `uv` не зависят.
 
 ### 3.2. Почему `domain/review` — отдельный пакет без I/O
 

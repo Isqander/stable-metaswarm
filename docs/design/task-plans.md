@@ -227,8 +227,9 @@ Anthropic даёт `claude-opus-5`. Самоописание GLM между prob
 
 ### T1.1 · Скелет · 0.5 д
 
-Пакет, зависимости, ruff, pytest, один скрипт запуска проверок. Ничего лишнего:
-ни CI, ни докера, ни pre-commit.
+Python-пакет в `src/metaswarm`, явный setuptools discovery, `pyproject.toml` +
+`uv.lock`, ruff, pytest и единый `scripts/check.sh`. Ничего лишнего: ни CI, ни
+докера, ни pre-commit.
 
 **Готово, когда:** `pytest` и `ruff` проходят на пустом проекте одной командой.
 

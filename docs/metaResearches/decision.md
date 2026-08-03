@@ -49,6 +49,13 @@
 | Конфиг флоу | **YAML + Pydantic `extra="forbid"`** | Канонический JSON с хешем показывается до запуска |
 | Канал с человеком | **Свой Telegram-бот, long polling** | Через transactional outbox |
 | CLI | Typer + Rich (или эквивалент) | `run / status / continue / pause / cancel / answer / validate` |
+| Packaging и dev-tooling | **`setuptools`, `uv` + `uv.lock`, `src/metaswarm`** | Зависимость меняется вместе с lockfile; единая локальная проверка — `./scripts/check.sh`; `uv` не является runtime-зависимостью |
+
+`pyproject.toml` объявляет project/dev dependencies, `uv.lock` фиксирует их
+точную резолюцию, а `uv run --locked` запрещает проверке молча переписать
+устаревший lockfile. Если `uv` отсутствует, `scripts/check.sh` завершается как
+обычный POSIX command-not-found с кодом 127. Сам сервис не запускает `uv` и не
+проверяет его в production readiness.
 
 **Ничего из чужого не является зависимостью рантайма.** Доноры:
 
