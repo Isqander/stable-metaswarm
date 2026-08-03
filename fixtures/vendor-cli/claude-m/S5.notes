@@ -1,0 +1,6 @@
+observed_on=2026-08-03
+platform=Ubuntu 24.04 VPS, Linux 6.8.0
+duration_ms=3820
+setup_fixture=S5-setup
+resumed_session_id=791de899-320d-4526-ae85-3fa544b7ea65
+profile_env=ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic; ANTHROPIC_AUTH_TOKEN=<REDACTED>; model aliases map opus to MiniMax-M3

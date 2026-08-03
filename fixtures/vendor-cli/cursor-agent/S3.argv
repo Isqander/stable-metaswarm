@@ -1,0 +1,1 @@
+cursor-agent -p 'Report your exact model identity. Reply in one line in this format: provider=<provider>; model=<exact model identifier>. Do not use tools.' --output-format json

@@ -1,0 +1,1 @@
+claude -p 'Remember exactly this nonce: ORBIT-47. Reply with exactly: STORED' --output-format json

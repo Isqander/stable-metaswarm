@@ -1,0 +1,8 @@
+error: unexpected argument '--definitely-not-a-real-flag' found
+
+  tip: to pass '--definitely-not-a-real-flag' as a value, use '-- --definitely-not-a-real-flag'
+
+Usage: codex exec [OPTIONS] [PROMPT]
+       codex exec [OPTIONS] <COMMAND> [ARGS]
+
+For more information, try '--help'.

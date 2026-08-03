@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019fc6e1-09d6-7481-91e0-72913adb192a"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"ORBIT-47"}}
+{"type":"turn.completed","usage":{"input_tokens":28950,"cached_input_tokens":25088,"cache_write_input_tokens":0,"output_tokens":15,"reasoning_output_tokens":0}}

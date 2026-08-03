@@ -1,0 +1,1 @@
+codex exec --json --sandbox workspace-write --skip-git-repo-check -C <EMPTY_WORKDIR> 'Run exactly this shell command: printf START\n; sleep 6; printf END\n. Then reply with exactly: DONE'

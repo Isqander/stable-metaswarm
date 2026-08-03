@@ -1,0 +1,1 @@
+codex exec --json 'Write the integers from 1 through 100000, one per line. Do not use tools and do not abbreviate.'

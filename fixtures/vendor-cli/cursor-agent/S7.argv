@@ -1,0 +1,1 @@
+cursor-agent -p 'Write a very long response' --output-format stream-json

@@ -1,0 +1,1 @@
+cursor-agent -p 'Attempt to create vendor-probe.txt' --mode ask --workspace <EMPTY_WORKDIR>

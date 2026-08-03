@@ -1,0 +1,7 @@
+observed_on=2026-08-03
+platform=Ubuntu 24.04 VPS, Linux 6.8.0
+output_seen_after_ms=2992
+sigterm_sent_after_ms=4090
+exit_after_sigterm_ms=303
+sigkill_required=no
+process_group_signalled=yes

@@ -1,0 +1,1 @@
+claude -p 'Use the Bash tool to run: printf START\n; sleep 6; printf END\n. Then reply with exactly: DONE' --output-format stream-json --verbose --allowedTools Bash

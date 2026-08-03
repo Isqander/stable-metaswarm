@@ -1,0 +1,1 @@
+cursor-agent -p 'Produce output, pause for 6 seconds, then finish' --output-format stream-json

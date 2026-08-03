@@ -732,10 +732,26 @@ profiles:
     requested_model: opus
     env_map:
       ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic"
-      ANTHROPIC_API_KEY:  { secret_ref: "zai_key" }
-    env_allowlist: [PATH, HOME, LANG, ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY]
+      ANTHROPIC_AUTH_TOKEN: { secret_ref: "zai_key" }
+      ANTHROPIC_MODEL: "glm-5.2"
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "glm-5.2"
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "glm-5-turbo"
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "glm-4.5-air"
+      ANTHROPIC_SMALL_FAST_MODEL: "glm-4.5-air"
+    env_allowlist:
+      - PATH
+      - HOME
+      - LANG
+      - ANTHROPIC_BASE_URL
+      - ANTHROPIC_AUTH_TOKEN
+      - ANTHROPIC_MODEL
+      - ANTHROPIC_DEFAULT_OPUS_MODEL
+      - ANTHROPIC_DEFAULT_SONNET_MODEL
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL
+      - ANTHROPIC_SMALL_FAST_MODEL
     soft_timeout_s: 120
     hard_timeout_s: 3600
+    term_grace_s: 2
 ```
 
 Рантайм сам собирает окружение и argv. Никаких bash-обёрток в `~/.local/bin`:
@@ -763,16 +779,32 @@ resume_args(session)   → продолжение логической сесс�
 classify_exit(code, subtype) → attempt outcome
 ```
 
-`classify_exit` — самая ценная часть, и её форма взята у bernstein: коды выхода
-Claude Code (0/1/2/3 context overflow/4 permission/130/137/143) и `result.subtype`
-из stream-json (`error_max_turns`, `error_context_window`, `error_permission`)
-дают разные исходы. Без такой классификации «вендор недоступен» неотличимо от
-«агент отказался работать», и retry-бюджеты тратятся не на то.
+Проверенные контракты зафиксированы в `vendor-cli-contracts.md`; адаптеры не
+имеют права подменять их прежними гипотезами.
+
+Для Claude основной режим — `-p --model <requested> --output-format
+stream-json --verbose`. `system/init.model` даёт `actual_model`, а успех требует
+финального `type=result`, `subtype=success`, `is_error=false` и exit 0. Для
+Codex основной режим — `exec --json`: результат — последний completed
+`agent_message` перед обязательным `turn.completed`, также при exit 0. В
+Codex 0.146.0 SIGTERM наблюдён с **exit 0 без `turn.completed`**, поэтому один
+код возврата принципиально недостаточен.
+
+`classify_exit` объединяет exit code, наличие protocol completion marker и
+vendor subtype. Из проверенного: неизвестный флаг Claude 2.1.220 даёт 1,
+неизвестный флаг Codex 0.146.0 — 2, SIGTERM Claude — 143, SIGTERM Codex может
+дать 0 с незавершённым протоколом. Предполагаемые специальные Claude-коды 3/4 и
+subtype `error_max_turns`/`error_context_window`/`error_permission` пока не
+воспроизведены и контрактом не считаются. Spawn failure из-за отсутствующего
+cwd классифицируется до vendor exit. TERM посылается группе процессов; после
+проверенного консервативного grace 2 s следует SIGKILL.
 
 ### 9.3. Read-only ревьюер — три слоя
 
-1. Native-режим: read-only sandbox у codex, allowlist без записи у claude,
-   `--mode ask` у cursor.
+1. Native-режим: `--sandbox read-only` у codex; у claude строгий allowlist
+   `--tools Read,Grep,Glob` (не `--permission-mode plan`: он пишет plan в
+   `~/.claude/plans`); `--mode ask` у cursor пока остаётся непроверенной
+   гипотезой, потому что бинаря на VPS нет.
 2. Disposable checkout на зафиксированном SHA; результат — через stdout, в
    artifact repo пишет рантайм.
 3. Сверка tracked, untracked и index до и после. Любая мутация →

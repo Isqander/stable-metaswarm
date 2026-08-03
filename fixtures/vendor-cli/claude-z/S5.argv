@@ -1,0 +1,1 @@
+claude -p 'Reply with exactly the nonce from the previous turn' --resume 789749c4-8be5-4b4f-b6e6-08489f97ee4d --output-format json

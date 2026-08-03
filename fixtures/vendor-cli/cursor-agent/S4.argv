@@ -1,0 +1,1 @@
+cursor-agent -p 'Reply with exactly: PONG' --output-format stream-json

@@ -1,0 +1,1 @@
+claude -p 'Use the Write tool to create vendor-probe.txt containing MUTATED, then report what happened.' --output-format json --permission-mode plan --tools Write

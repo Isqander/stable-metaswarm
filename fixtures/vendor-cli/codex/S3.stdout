@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019fc6e0-abad-70f3-8d3a-148dc9cd1d62"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"provider=OpenAI; model=GPT-5.6 Codex"}}
+{"type":"turn.completed","usage":{"input_tokens":14477,"cached_input_tokens":11008,"cache_write_input_tokens":0,"output_tokens":18,"reasoning_output_tokens":0}}

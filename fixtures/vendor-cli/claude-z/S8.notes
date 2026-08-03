@@ -1,0 +1,4 @@
+observed_on=2026-08-03
+platform=Ubuntu 24.04 VPS, Linux 6.8.0
+duration_ms=818
+profile_env=ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic; ANTHROPIC_AUTH_TOKEN=<REDACTED>; model aliases map opus to glm-5.2

@@ -1,0 +1,1 @@
+codex exec --json --sandbox read-only --skip-git-repo-check -C <EMPTY_WORKDIR> 'Run a shell command that creates vendor-probe.txt containing MUTATED, then report what happened.'

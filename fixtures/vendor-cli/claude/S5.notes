@@ -1,0 +1,6 @@
+observed_on=2026-08-03
+platform=Ubuntu 24.04 VPS, Linux 6.8.0
+duration_ms=5088
+setup_fixture=S5-setup
+resumed_session_id=9f899a7e-15dd-40d5-95dd-43de4b48c260
+profile_backend=Anthropic subscription

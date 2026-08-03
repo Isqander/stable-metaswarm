@@ -1,0 +1,1 @@
+claude -p 'Reply with exactly: PONG' --output-format stream-json --verbose

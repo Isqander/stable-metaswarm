@@ -1,0 +1,1 @@
+cursor-agent -p 'Reply with exactly the nonce from the previous turn' --resume <SESSION_ID> --output-format stream-json
