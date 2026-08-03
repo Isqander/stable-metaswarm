@@ -968,6 +968,11 @@ M0-проверка 2026-08-03 на Linux VPS подтвердила headless д
 зафиксирован как недоступный желательный профиль. Полный наблюдённый контракт и
 версии — в `../design/vendor-cli-contracts.md`.
 
+После ревью Claude fixtures перезаписаны с `--safe-mode
+--disable-slash-commands --strict-mcp-config` и явным role-specific `--tools`.
+Это сохраняет `HOME` для подписочной auth, но не наследует операторские MCP,
+skills и memory. Structured init проверяется до допуска результата в кворум.
+
 **Обязательны четыре первых профиля** — они дают четыре независимых мнения
 (Anthropic, MiniMax, Z.AI, OpenAI), чего хватает на два кворума и на правило
 свежести. **`cursor-agent` очень желателен, но не блокирует v1**: readiness probe
@@ -1004,8 +1009,10 @@ guarantee здесь нет. Что гарантируется на самом �
 
 ### 9.2. Ревьюер строго read-only — три слоя
 
-1. Native-режим вендора: `--sandbox read-only` у codex, строгий allowlist
-   `--tools Read,Grep,Glob` у claude. `--permission-mode plan` для этой цели
+1. Native-режим вендора: `--sandbox read-only` у codex; у claude изолирующие
+   `--safe-mode --disable-slash-commands --strict-mcp-config` и **замена**
+   toolset через `--tools Read,Grep,Glob`. `--allowedTools` только выдаёт
+   разрешение и границу не создаёт. `--permission-mode plan` для этой цели
    запрещён: probe показал запись plan-файла вне checkout. `--mode ask` у cursor
    остаётся гипотезой до появления бинаря.
 2. Работа в disposable checkout на зафиксированном SHA; результат возвращается
@@ -1370,8 +1377,10 @@ tests — отдельным opt-in набором.
 Codex CLI 0.146.0 сняты на Linux VPS для Anthropic, MiniMax, Z.AI и OpenAI;
 фикстуры и fake CLI сохранены. Проверка подтвердила четыре разные фактические
 пары provider+model и не изменила стек, но уточнила механику адаптеров: Claude
-read-only делается tool allowlist, Codex требует protocol completion marker
-даже при exit 0, а старые предполагаемые коды ошибок нельзя считать фактом.
+read-only делается изолированным explicit toolset, Codex требует protocol
+completion marker даже при exit 0, а старые предполагаемые коды ошибок нельзя
+считать фактом. Fake CLI отдельно моделирует невалидный доменный result и
+синтаксически повреждённый vendor stream, чтобы не смешивать два класса ошибок.
 `cursor-agent` остаётся непроверенным по формату, потому что бинаря на VPS нет;
 для желательного профиля это принятый неблокирующий исход. WSL2-специфичное
 допущение recovery также не проверено, поскольку probe шёл на обычном VPS.

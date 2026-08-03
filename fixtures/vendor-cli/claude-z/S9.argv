@@ -1,1 +1,1 @@
-claude -p 'Use the Bash tool to run: printf START\n; sleep 6; printf END\n. Then reply with exactly: DONE' --output-format stream-json --verbose --allowedTools Bash
+claude --safe-mode --disable-slash-commands --strict-mcp-config --tools Bash --allowedTools Bash -p 'Use the Bash tool to run: printf START\n; sleep 6; printf END\n. Then reply with exactly: DONE' --output-format stream-json --verbose

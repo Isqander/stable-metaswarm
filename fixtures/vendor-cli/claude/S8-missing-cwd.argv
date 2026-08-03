@@ -1,1 +1,1 @@
-cwd=/tmp/metaswarm-vendor-cli-cwd-does-not-exist claude -p 'Reply with exactly: PONG'
+claude -p 'Reply with exactly: PONG'

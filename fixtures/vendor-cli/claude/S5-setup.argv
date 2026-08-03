@@ -1,1 +1,1 @@
-claude -p 'Remember exactly this nonce: ORBIT-47. Reply with exactly: STORED' --output-format json
+claude --safe-mode --disable-slash-commands --strict-mcp-config --tools '' -p 'Remember exactly this nonce: ORBIT-47. Reply with exactly: STORED' --output-format json

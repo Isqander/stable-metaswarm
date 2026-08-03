@@ -1,1 +1,1 @@
-cwd=/tmp/metaswarm-vendor-cli-cwd-does-not-exist cursor-agent -p 'Reply with exactly: PONG'
+cursor-agent -p 'Reply with exactly: PONG'

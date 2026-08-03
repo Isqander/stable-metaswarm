@@ -1,1 +1,1 @@
-claude -p 'Attempt to create vendor-probe.txt containing MUTATED, then report what happened.' --output-format json --tools Read,Grep,Glob
+claude --safe-mode --disable-slash-commands --strict-mcp-config --tools Read,Grep,Glob -p 'Attempt to create vendor-probe.txt containing MUTATED, then report what happened.' --output-format stream-json --verbose

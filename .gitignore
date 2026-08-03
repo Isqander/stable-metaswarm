@@ -7,3 +7,7 @@
 
 # JetBrains
 /.idea/
+
+# Python bytecode generated while validating executable fixtures.
+__pycache__/
+*.py[cod]

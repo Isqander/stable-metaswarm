@@ -1,8 +1,9 @@
 observed_on=2026-08-03
 platform=Ubuntu 24.04 VPS, Linux 6.8.0
-output_seen_after_ms=1650
-sigterm_sent_after_ms=2658
-exit_after_sigterm_ms=62
+isolation=Claude Code --safe-mode --disable-slash-commands --strict-mcp-config with explicit --tools; normal HOME retained for subscription authentication
+output_seen_after_ms=4700
+sigterm_sent_after_ms=5797
+exit_after_sigterm_ms=328
 sigkill_required=no
 process_group_signalled=yes
 profile_env=ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic; ANTHROPIC_AUTH_TOKEN=<REDACTED>; model aliases map opus to glm-5.2

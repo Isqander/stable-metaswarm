@@ -729,6 +729,10 @@ profiles:
   claude-z:
     adapter: claude
     executable: claude
+    base_args:
+      - --safe-mode
+      - --disable-slash-commands
+      - --strict-mcp-config
     requested_model: opus
     env_map:
       ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic"
@@ -764,6 +768,12 @@ profiles:
 redaction **до записи** транскрипта, отсутствие секрета в промпте, событии,
 манифесте и артефакте.
 
+`HOME` остаётся в allowlist намеренно: подписочная auth Claude хранится там.
+Наследование пользовательских MCP, skills, agents и memory блокируется не
+подменой HOME, а проверенными `base_args` плюс явным role-specific `--tools`.
+Structured init обязан подтвердить ожидаемый toolset и пустые MCP/skills/memory
+до того, как результат попытки может участвовать в кворуме.
+
 ### 9.2. Адаптер — механика семейства
 
 Три адаптера: `claude`, `codex`, `cursor`. Каждый умеет ровно это:
@@ -782,13 +792,16 @@ classify_exit(code, subtype) → attempt outcome
 Проверенные контракты зафиксированы в `vendor-cli-contracts.md`; адаптеры не
 имеют права подменять их прежними гипотезами.
 
-Для Claude основной режим — `-p --model <requested> --output-format
-stream-json --verbose`. `system/init.model` даёт `actual_model`, а успех требует
-финального `type=result`, `subtype=success`, `is_error=false` и exit 0. Для
-Codex основной режим — `exec --json`: результат — последний completed
-`agent_message` перед обязательным `turn.completed`, также при exit 0. В
-Codex 0.146.0 SIGTERM наблюдён с **exit 0 без `turn.completed`**, поэтому один
-код возврата принципиально недостаточен.
+Для Claude основной режим — `--safe-mode --disable-slash-commands
+--strict-mcp-config --tools <role-toolset> -p --model <requested>
+--output-format stream-json --verbose`. `--tools` заменяет набор инструментов;
+`--allowedTools` только разрешает элементы уже доступного набора и границу
+read-only не задаёт. `system/init.model` даёт `actual_model`, а init tool/MCP/
+skills/memory сверяются с ролью. Успех требует финального `type=result`,
+`subtype=success`, `is_error=false` и exit 0. Для Codex основной режим — `exec
+--json`: результат — последний completed `agent_message` перед обязательным
+`turn.completed`, также при exit 0. В Codex 0.146.0 SIGTERM наблюдён с **exit 0
+без `turn.completed`**, поэтому один код возврата принципиально недостаточен.
 
 `classify_exit` объединяет exit code, наличие protocol completion marker и
 vendor subtype. Из проверенного: неизвестный флаг Claude 2.1.220 даёт 1,
@@ -801,8 +814,9 @@ cwd классифицируется до vendor exit. TERM посылается
 
 ### 9.3. Read-only ревьюер — три слоя
 
-1. Native-режим: `--sandbox read-only` у codex; у claude строгий allowlist
-   `--tools Read,Grep,Glob` (не `--permission-mode plan`: он пишет plan в
+1. Native-режим: `--sandbox read-only` у codex; у claude изолирующие base args
+   плюс строгая замена toolset через `--tools Read,Grep,Glob` (не
+   `--allowedTools` и не `--permission-mode plan`: последний пишет plan в
    `~/.claude/plans`); `--mode ask` у cursor пока остаётся непроверенной
    гипотезой, потому что бинаря на VPS нет.
 2. Disposable checkout на зафиксированном SHA; результат — через stdout, в

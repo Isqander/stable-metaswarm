@@ -8,6 +8,11 @@ Linux 6.8.0. Это не WSL2; допущение recovery о чтении
 указанных версиях, поэтому версии входят в drift check, а real-vendor smoke
 tests остаются opt-in.
 
+После ревью Claude-сценарии S2–S7 и S9 перезаписаны с изоляцией
+`--safe-mode --disable-slash-commands --strict-mcp-config` и явным `--tools`.
+Обычный `HOME` сохранён для подписочной auth, но в structured init нет MCP,
+skills и auto-memory; доступный toolset задаётся сценарием.
+
 ## 1. Результат T0.3: фактические модели
 
 Запрос `opus` проверен явно через `--model opus`. Для Claude Code одиночный
@@ -37,9 +42,9 @@ launcher, не Claude. В Codex `-C` является собственным ф�
 
 | Профиль | S1 version | S2 PONG | S3 identity | S4 structured | S5 resume | S6 read-only | S7 SIGTERM | S8 errors | S9 pause/liveness |
 |---|---|---|---|---|---|---|---|---|---|
-| `claude` | `2.1.220`, 0 | stdout `PONG`, 0 | JSON, Opus 5, 0 | JSONL; финал `result/success`, 0 | тот же UUID, `ORBIT-47`, 0 | allowlist без write; файл не создан, 0 | 143; финал `error_during_execution/aborted_streaming`; 441 ms; без KILL | bad flag 1; missing cwd 125 before CLI | 14.038 s; max stdout gap 3.214 s; 0 |
-| `claude-m` | `2.1.220`, 0 | stdout `PONG`, 0 | JSON, MiniMax-M3, 0 | JSONL; финал `result/success`, 0 | тот же UUID, `ORBIT-47`, 0 | allowlist без write; файл не создан, 0 | 143; финального события нет; 8 ms; без KILL | bad flag 1; missing cwd 125 before CLI | 15.892 s; max gap 3.238 s; 0 |
-| `claude-z` | `2.1.220`, 0 | stdout `PONG`, 0 | JSON, glm-5.2, 0 | JSONL; финал `result/success`, 0 | тот же UUID, `ORBIT-47`, 0 | allowlist без write; файл не создан, 0 | 143; финального события нет; 62 ms; без KILL | bad flag 1; missing cwd 125 before CLI | 14.641 s; max gap 3.875 s; 0 |
+| `claude` | `2.1.220`, 0 | stdout `PONG`, 0 | JSON, Opus 5, 0 | isolated JSONL; tools/MCP/skills пусты; финал `result/success`, 0 | тот же UUID, `ORBIT-47`, 0 | JSONL init: только `Glob/Grep/Read`, MCP/skills/memory отсутствуют; файл не создан, 0 | 143; финал `error_during_execution/aborted_streaming`; 616 ms; без KILL | bad flag 1; missing cwd 125 before CLI | 21.456 s; max stdout gap 3.470 s; 0 |
+| `claude-m` | `2.1.220`, 0 | stdout `PONG`, 0 | JSON, MiniMax-M3, 0 | isolated JSONL; tools/MCP/skills пусты; финал `result/success`, 0 | тот же UUID, `ORBIT-47`, 0 | JSONL init: только `Glob/Grep/Read`, MCP/skills/memory отсутствуют; файл не создан, 0 | 143; финал `error_during_execution/aborted_streaming`; 13 ms; без KILL | bad flag 1; missing cwd 125 before CLI | 20.155 s; max gap 4.023 s; 0 |
+| `claude-z` | `2.1.220`, 0 | stdout `PONG`, 0 | JSON, glm-5.2, 0 | isolated JSONL; tools/MCP/skills пусты; финал `result/success`, 0 | тот же UUID, `ORBIT-47`, 0 | JSONL init: только `Glob/Grep/Read`, MCP/skills/memory отсутствуют; файл не создан, 0 | 143; финального события нет; 328 ms; без KILL | bad flag 1; missing cwd 125 before CLI | 23.723 s; max gap 6.100 s; 0 |
 | `codex` | `0.146.0`, 0 | stdout `PONG`; banner в stderr; 0 | JSONL без model metadata; self-report, 0 | JSONL; `item.completed/agent_message` перед `turn.completed`; 0 | тот же `thread_id`, `ORBIT-47`, 0 | `--sandbox read-only`; write получает EROFS; файл не создан; 0 | **0 без `turn.completed`**; 303 ms; без KILL | bad flag 2; missing `-C` cwd 1 | 20.603 s; max gap 6.909 s; 0 |
 | `cursor-agent` | проверено: 127, не установлен | 127, недоступен | 127, недоступен | 127, недоступен | 127, недоступен | 127, недоступен | 127, сигнал послать некому | bad flag 127; missing cwd 125 before CLI | 127, недоступен |
 
@@ -52,8 +57,17 @@ launcher, не Claude. В Codex `-C` является собственным ф�
 Проверенный основной argv:
 
 ```text
-claude -p <prompt> --model <requested> --output-format stream-json --verbose
+claude --safe-mode --disable-slash-commands --strict-mcp-config \
+  --tools <role-toolset> -p <prompt> --model <requested> \
+  --output-format stream-json --verbose
 ```
+
+`HOME` намеренно остаётся в env allowlist: Anthropic subscription берёт оттуда
+auth. Изоляция пользовательской конфигурации обеспечивается argv: safe mode
+отключает custom agents/hooks/memory, strict MCP не наследует серверы, запрет
+slash commands обнуляет skills, а явный `--tools` не даёт случайно получить
+инструменты оператора. В init остаются имена встроенных agents Claude Code, но
+без `Task` в toolset вызвать их невозможно.
 
 Для профилей MiniMax и Z.AI рантайм должен запускать тот же бинарь напрямую,
 передавая через env как минимум `ANTHROPIC_BASE_URL`,
@@ -68,7 +82,8 @@ probe задавали:
 Контракт разбора:
 
 - первая строка `system/init` даёт `session_id`, `model`, `permissionMode` и
-  список реально доступных tools;
+  список реально доступных tools; адаптер проверяет role-specific toolset и
+  отсутствие MCP/skills/memory, но не фиксирует прочие диагностические поля;
 - любой корректно разобранный event и любой новый байт stdout/stderr —
   activity для heartbeat;
 - успешный финал — только `type=result`, `subtype=success`, `is_error=false`;
@@ -76,7 +91,7 @@ probe задавали:
 - UUID для продолжения берётся из `session_id`; проверенный resume-argv —
   `--resume <uuid>` вместе с новым `-p`;
 - SIGTERM посылается группе процессов. Худший из трёх наблюдённых grace —
-  441 ms; для v1 принимается консервативный `term_grace_s=2`, затем SIGKILL;
+  616 ms; для v1 принимается консервативный `term_grace_s=2`, затем SIGKILL;
 - exit 0 без успешного result не является успехом. Exit 143 — прерывание, даже
   если успел прийти error-result. Неизвестный флаг в 2.1.220 возвращает 1, а не
   предполагавшийся 2.
@@ -84,14 +99,23 @@ probe задавали:
 Строгий native read-only для ревьюера — allowlist:
 
 ```text
---tools Read,Grep,Glob
+--safe-mode --disable-slash-commands --strict-mcp-config \
+  --tools Read,Grep,Glob
 ```
 
-Попытка записи при таком allowlist не доходит до filesystem: write-capable
-tools отсутствуют, рабочий каталог остаётся неизменным. `--permission-mode
-plan` **не является строгим read-only**: дополнительный probe не изменил
-checkout, но записал plan в `~/.claude/plans`. Это наблюдение сохранено как
-`S6-plan-mode`; созданный plan-файл после фиксации удалён.
+S6 теперь снят в `stream-json`: `system/init` машинно подтверждает tools ровно
+`Glob/Grep/Read`, пустые MCP/skills/slash commands и отсутствие memory path.
+Попытка записи не доходит до filesystem, рабочий каталог остаётся неизменным.
+
+`--tools` **заменяет** доступный набор инструментов. `--allowedTools` только
+разрешает перечисленные инструменты внутри уже доступного набора и не годится
+для формирования read-only границы. В S9 оба механизма применены осознанно:
+`--tools Bash --allowedTools Bash` сначала делает Bash единственным tool, затем
+разрешает его без интерактивного запроса.
+
+`--permission-mode plan` **не является строгим read-only**: дополнительный
+probe не изменил checkout, но записал plan в `~/.claude/plans`. Это наблюдение
+сохранено как `S6-plan-mode`; созданный plan-файл после фиксации удалён.
 
 ## 4. Контракт адаптера Codex
 
@@ -166,7 +190,15 @@ requested model. Нельзя принимать текстовое самооп
 `../../fixtures/vendor-cli/fake-cli.py` выбирает профиль через `FAKE_PROFILE`,
 находит fixture по argv и воспроизводит оба потока и exit code. Реализованы все
 обязательные режимы `FAKE_MODE`: `broken_json`, `silent`, `no_finish`,
-`ignore_term`, `slow`. Инструкции запуска находятся рядом в `README.md`.
+`ignore_term`, `slow`. `broken_json` сохраняет vendor startup/completion и
+портит только JSON между доменными маркерами. Дополнительный
+`malformed_stream` выдаёт синтаксически невалидный vendor JSON/JSONL. Ошибки
+настройки самого fake возвращают 97, а не vendor-like код 2.
+
+У supplemental `S8-missing-cwd` `.argv` содержит только настоящую команду;
+cwd записан в `.notes`, поскольку это launcher metadata. Такие fixtures не
+участвуют в автоматическом argv matching и выбираются через
+`FAKE_SCENARIO=S8-missing-cwd`.
 
 Перед фиксацией fixture tree проверен против двух реальных значений токенов из
 локальных wrapper-файлов и распространённых token patterns. Совпадений нет;

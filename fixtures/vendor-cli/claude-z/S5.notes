@@ -1,6 +1,7 @@
 observed_on=2026-08-03
 platform=Ubuntu 24.04 VPS, Linux 6.8.0
-duration_ms=4579
-setup_fixture=S5-setup
-resumed_session_id=789749c4-8be5-4b4f-b6e6-08489f97ee4d
+duration_ms=12968
+isolation=Claude Code --safe-mode --disable-slash-commands --strict-mcp-config with explicit --tools; normal HOME retained for subscription authentication
 profile_env=ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic; ANTHROPIC_AUTH_TOKEN=<REDACTED>; model aliases map opus to glm-5.2
+setup_fixture=S5-setup
+resumed_session_id=745a6af5-e894-49b3-a5ab-0a6bf62bb827

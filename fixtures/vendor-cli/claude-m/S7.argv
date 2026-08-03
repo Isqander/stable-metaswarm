@@ -1,1 +1,1 @@
-claude -p 'Write the integers from 1 through 100000, one per line. Do not use tools and do not abbreviate.' --output-format stream-json --verbose --include-partial-messages
+claude --safe-mode --disable-slash-commands --strict-mcp-config --tools '' -p 'Write the integers from 1 through 100000, one per line. Do not use tools and do not abbreviate.' --output-format stream-json --verbose --include-partial-messages

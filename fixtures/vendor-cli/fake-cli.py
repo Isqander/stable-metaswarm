@@ -16,6 +16,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import NoReturn
 
 
 ROOT = Path(__file__).resolve().parent
@@ -26,10 +27,24 @@ EXECUTABLES = {
     "codex": "codex",
     "cursor-agent": "cursor-agent",
 }
-MODES = {"normal", "broken_json", "silent", "no_finish", "ignore_term", "slow"}
+INTERNAL_ERROR = 97
+MODES = {
+    "normal",
+    "broken_json",
+    "malformed_stream",
+    "silent",
+    "no_finish",
+    "ignore_term",
+    "slow",
+}
+INVALID_DOMAIN_RESULT = (
+    "<<<METASWARM-RESULT-BEGIN>>>\n"
+    '{"schema":"review.observations.v1","observations":[}\n'
+    "<<<METASWARM-RESULT-END>>>"
+)
 
 
-def fail(message: str, code: int = 2) -> "NoReturn":
+def fail(message: str, code: int = INTERNAL_ERROR) -> NoReturn:
     print(f"fake-cli: {message}", file=sys.stderr)
     raise SystemExit(code)
 
@@ -44,6 +59,10 @@ def scenario_from_argv(profile: str) -> str:
     actual = [EXECUTABLES[profile], *sys.argv[1:]]
     matches: list[str] = []
     for path in sorted((ROOT / profile).glob("*.argv")):
+        # Missing-cwd fixtures describe a launcher failure, not a vendor argv
+        # outcome. Select them explicitly with FAKE_SCENARIO.
+        if path.stem.endswith("-missing-cwd"):
+            continue
         try:
             expected = shlex.split(path.read_text(encoding="utf-8"))
         except ValueError as error:
@@ -69,27 +88,70 @@ def read_fixture(profile: str, scenario: str) -> tuple[bytes, bytes, int]:
     return stdout, stderr, exit_code
 
 
-def broken_json_envelope(profile: str) -> bytes:
-    invalid_result = (
-        "<<<METASWARM-RESULT-BEGIN>>>\n"
-        '{"schema":"review.observations.v1","observations":[}\n'
-        "<<<METASWARM-RESULT-END>>>"
-    )
+def structured_lines(stdout: bytes) -> tuple[list[bytes], list[dict[str, object] | None]]:
+    lines = stdout.splitlines(keepends=True)
+    events: list[dict[str, object] | None] = []
+    for line in lines:
+        if not line.strip():
+            events.append(None)
+            continue
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            fail(f"selected fixture is not valid vendor JSON/JSONL: {error}")
+        if not isinstance(event, dict):
+            fail("selected fixture contains a non-object vendor event")
+        events.append(event)
+    return lines, events
+
+
+def result_event_index(profile: str, events: list[dict[str, object] | None]) -> int:
+    candidates: list[int] = []
+    for index, event in enumerate(events):
+        if event is None:
+            continue
+        if profile.startswith("claude") and event.get("type") == "result":
+            candidates.append(index)
+        elif profile == "codex" and event.get("type") == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                candidates.append(index)
+    if not candidates:
+        fail("selected fixture has no machine-readable final result to corrupt")
+    return candidates[-1]
+
+
+def require_success_fixture(exit_code: int) -> None:
+    if exit_code != 0:
+        fail("JSON corruption modes require a fixture whose observed exit code is 0")
+
+
+def broken_domain_json(profile: str, stdout: bytes, exit_code: int) -> bytes:
+    """Keep the vendor protocol valid and corrupt only the domain result JSON."""
+    require_success_fixture(exit_code)
+    lines, events = structured_lines(stdout)
+    index = result_event_index(profile, events)
+    event = events[index]
+    assert event is not None
     if profile.startswith("claude"):
-        envelope = {
-            "type": "result",
-            "subtype": "success",
-            "is_error": False,
-            "result": invalid_result,
-        }
+        event["result"] = INVALID_DOMAIN_RESULT
     elif profile == "codex":
-        envelope = {
-            "type": "item.completed",
-            "item": {"id": "fake-broken-json", "type": "agent_message", "text": invalid_result},
-        }
+        item = event["item"]
+        assert isinstance(item, dict)
+        item["text"] = INVALID_DOMAIN_RESULT
     else:
-        envelope = {"type": "result", "result": invalid_result}
-    return (json.dumps(envelope, separators=(",", ":")) + "\n").encode()
+        fail(f"broken_json is not defined for unavailable profile {profile}")
+    ending = b"\n" if lines[index].endswith(b"\n") else b""
+    lines[index] = json.dumps(event, separators=(",", ":")).encode() + ending
+    return b"".join(lines)
+
+
+def malformed_vendor_stream(profile: str, stdout: bytes, exit_code: int) -> bytes:
+    """Keep startup events, then emit a syntactically invalid vendor JSON line."""
+    require_success_fixture(exit_code)
+    lines, events = structured_lines(stdout)
+    index = result_event_index(profile, events)
+    return b"".join(lines[:index]) + b'{"type":"malformed_fixture","payload":\n'
 
 
 def write_normal(stdout: bytes, stderr: bytes) -> None:
@@ -101,7 +163,7 @@ def write_normal(stdout: bytes, stderr: bytes) -> None:
         sys.stdout.buffer.flush()
 
 
-def hang() -> "NoReturn":
+def hang() -> NoReturn:
     while True:
         time.sleep(3600)
 
@@ -140,8 +202,11 @@ def main() -> int:
     if mode == "silent":
         hang()
     if mode == "broken_json":
-        write_normal(broken_json_envelope(profile), stderr)
-        return 0
+        write_normal(broken_domain_json(profile, stdout, exit_code), stderr)
+        return exit_code
+    if mode == "malformed_stream":
+        write_normal(malformed_vendor_stream(profile, stdout, exit_code), stderr)
+        return exit_code
     if mode == "ignore_term":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         write_normal(stdout, stderr)

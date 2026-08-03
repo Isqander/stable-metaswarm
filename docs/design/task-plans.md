@@ -140,7 +140,9 @@ SIGTERM.
 
 **Факт:** четыре обязательных профиля имеют машинно выделяемый финал;
 `cursor-agent` проверенно не установлен. Codex требует `turn.completed` в
-добавление к exit 0, Claude — `result/success`.
+добавление к exit 0, Claude — `result/success`. После ревью Claude fixtures
+перезаписаны с изоляцией пользовательских MCP/skills/memory; S6 в `stream-json`
+машинно подтверждает toolset `Glob/Grep/Read`.
 
 ### T0.2 · Фикстуры и фейковые CLI · оценка 1 д, факт <0.5 д · **готово**
 
@@ -157,6 +159,8 @@ SIGTERM.
 
 **Факт:** `fixtures/vendor-cli/fake-cli.py` воспроизводит оба потока и exit code;
 режимы `broken_json`, `silent`, `no_finish`, `ignore_term`, `slow` проверены.
+`broken_json` портит доменный payload внутри валидного vendor envelope;
+дополнительный `malformed_stream` покрывает невалидный vendor JSON/JSONL.
 
 ### T0.3 · Профили через `ANTHROPIC_BASE_URL` · оценка 0.5 д, факт <0.5 д · **готово**
 

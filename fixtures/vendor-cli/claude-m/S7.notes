@@ -1,8 +1,9 @@
 observed_on=2026-08-03
 platform=Ubuntu 24.04 VPS, Linux 6.8.0
-output_seen_after_ms=3295
-sigterm_sent_after_ms=4334
-exit_after_sigterm_ms=8
+isolation=Claude Code --safe-mode --disable-slash-commands --strict-mcp-config with explicit --tools; normal HOME retained for subscription authentication
+output_seen_after_ms=3877
+sigterm_sent_after_ms=4885
+exit_after_sigterm_ms=13
 sigkill_required=no
 process_group_signalled=yes
 profile_env=ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic; ANTHROPIC_AUTH_TOKEN=<REDACTED>; model aliases map opus to MiniMax-M3

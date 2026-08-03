@@ -1,4 +1,5 @@
 observed_on=2026-08-03
 platform=Ubuntu 24.04 VPS, Linux 6.8.0
-duration_ms=6143
+duration_ms=10663
+isolation=Claude Code --safe-mode --disable-slash-commands --strict-mcp-config with explicit --tools; normal HOME retained for subscription authentication
 profile_env=ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic; ANTHROPIC_AUTH_TOKEN=<REDACTED>; model aliases map opus to glm-5.2

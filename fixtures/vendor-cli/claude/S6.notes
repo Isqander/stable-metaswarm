@@ -1,5 +1,6 @@
 observed_on=2026-08-03
 platform=Ubuntu 24.04 VPS, Linux 6.8.0
-duration_ms=19068
-file_created=no
+duration_ms=16071
+isolation=Claude Code --safe-mode --disable-slash-commands --strict-mcp-config with explicit --tools; normal HOME retained for subscription authentication
 profile_backend=Anthropic subscription
+file_created=no

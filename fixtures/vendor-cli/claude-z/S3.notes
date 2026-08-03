@@ -1,5 +1,6 @@
 observed_on=2026-08-03
 platform=Ubuntu 24.04 VPS, Linux 6.8.0
-duration_ms=22161
+duration_ms=12021
+isolation=Claude Code --safe-mode --disable-slash-commands --strict-mcp-config with explicit --tools; normal HOME retained for subscription authentication
 profile_env=ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic; ANTHROPIC_AUTH_TOKEN=<REDACTED>; model aliases map opus to glm-5.2
-self_report_observation=This explicit --model opus run said provider=z.ai/model=glm-5.2, but the immediately preceding default-model identity probe reported Anthropic/Claude while metadata still reported glm-5.2. Self-report is nondeterministic and must not be trusted.
+self_report_observation=An earlier non-safe-mode probe reported Anthropic/Claude while metadata reported glm-5.2. Self-report is nondeterministic and must not be trusted.

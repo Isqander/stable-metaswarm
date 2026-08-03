@@ -1,8 +1,9 @@
 observed_on=2026-08-03
 platform=Ubuntu 24.04 VPS, Linux 6.8.0
-output_seen_after_ms=2810
-sigterm_sent_after_ms=3830
-exit_after_sigterm_ms=441
+isolation=Claude Code --safe-mode --disable-slash-commands --strict-mcp-config with explicit --tools; normal HOME retained for subscription authentication
+output_seen_after_ms=6383
+sigterm_sent_after_ms=7398
+exit_after_sigterm_ms=616
 sigkill_required=no
 process_group_signalled=yes
 profile_backend=Anthropic subscription

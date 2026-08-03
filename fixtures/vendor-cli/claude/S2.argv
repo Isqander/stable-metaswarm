@@ -1,1 +1,1 @@
-claude -p 'Reply with exactly: PONG'
+claude --safe-mode --disable-slash-commands --strict-mcp-config --tools '' -p 'Reply with exactly: PONG'

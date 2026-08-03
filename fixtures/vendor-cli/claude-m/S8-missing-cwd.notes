@@ -3,4 +3,5 @@ platform=Ubuntu 24.04 VPS, Linux 6.8.0
 duration_ms=8
 cwd=/tmp/metaswarm-vendor-cli-cwd-does-not-exist
 failure_source=GNU env launcher before vendor process start
+fake_selection=FAKE_SCENARIO=S8-missing-cwd; cwd is launcher metadata, not part of argv
 profile_env=ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic; ANTHROPIC_AUTH_TOKEN=<REDACTED>; model aliases map opus to MiniMax-M3

@@ -1,1 +1,1 @@
-claude -p 'Reply with exactly the nonce from the previous turn' --resume 9f899a7e-15dd-40d5-95dd-43de4b48c260 --output-format json
+claude --safe-mode --disable-slash-commands --strict-mcp-config --tools '' -p 'Reply with exactly the nonce from the previous turn' --resume 196f8993-34e9-4583-9926-d2e0bf8a8f4d --output-format json

@@ -1,5 +1,6 @@
 observed_on=2026-08-03
 platform=Ubuntu 24.04 VPS, Linux 6.8.0
-duration_ms=15826
-file_created=no
+duration_ms=26265
+isolation=Claude Code --safe-mode --disable-slash-commands --strict-mcp-config with explicit --tools; normal HOME retained for subscription authentication
 profile_env=ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic; ANTHROPIC_AUTH_TOKEN=<REDACTED>; model aliases map opus to MiniMax-M3
+file_created=no
