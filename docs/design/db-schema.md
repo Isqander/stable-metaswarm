@@ -1,11 +1,12 @@
 # Схема состояния: SQLite
 
-Дата: 2026-08-02. Статус: вторая редакция после внешнего ревью. Схема целиком
-как DDL не исполнялась; **несущие конструкции проверены вставкой** — составные FK
-`author_revision`, партиальный уникальный индекс активных попыток, партиальный
-индекс активной версии задачи, XOR-констрейнт наблюдения, триггер наследования
-severity, оба почищенных CHECK. Проверялось именно то, что они **отвергают**
-нарушение, а не только то, что синтаксис принимается.
+Дата: 2026-08-03. Статус: третья редакция после внешнего ревью. Связная DDL из
+документа впервые исполнена целиком в SQLite in-memory: 60 таблиц, 24 индекса,
+6 представлений и 6 триггеров; `PRAGMA foreign_key_check` чист. Отдельными
+негативными вставками проверены enum-FK, policy verdict и производные состояния
+`idle`/`cancelling`. Ранее проверенные несущие конструкции также остаются в
+наборе: составные FK `author_revision`, партиальные уникальные индексы, XOR
+наблюдения, триггер наследования severity и оба исправленных CHECK.
 
 Реализация модели данных из `../metaResearches/decision.md` §5–§6 в конкретном
 DDL. Документ отвечает на вопрос, на который решение не отвечает: **что именно
@@ -84,9 +85,12 @@ Wall-clock — для аудита и показа. Живость, таймау
 сервиса всё равно переводит незавершённые попытки в `interrupted` — но правило
 записано, чтобы никто не сравнил монотонные метки через границу перезапуска.
 
-### 1.4. Enum'ы — справочные таблицы, а не CHECK-списки
+### 1.4. Закрытые enum'ы — справочные таблицы, а не CHECK-списки
 
-Каждое перечисление живёт отдельной таблицей с FK на неё:
+Каждое **закрытое** перечисление живёт отдельной таблицей с FK на неё. Первая
+редакция декларировала это правило, но реально создавала только
+`severity_scale` и `resolution_kind`; остальные имена существовали лишь в
+`INSERT` из §12. Теперь определения входят в связный DDL:
 
 ```sql
 CREATE TABLE severity_scale (
@@ -95,6 +99,31 @@ CREATE TABLE severity_scale (
 );
 INSERT INTO severity_scale(severity, rank) VALUES
   ('low', 10), ('medium', 20), ('high', 30), ('critical', 40);
+
+CREATE TABLE attempt_outcome         (outcome   TEXT PRIMARY KEY);
+CREATE TABLE attempt_role            (role      TEXT PRIMARY KEY);
+CREATE TABLE heartbeat_source        (source    TEXT PRIMARY KEY);
+CREATE TABLE branch_kind             (kind      TEXT PRIMARY KEY);
+CREATE TABLE branch_state            (state     TEXT PRIMARY KEY);
+CREATE TABLE run_terminal_state      (state     TEXT PRIMARY KEY);
+CREATE TABLE campaign_state          (state     TEXT PRIMARY KEY);
+CREATE TABLE review_round_kind       (kind      TEXT PRIMARY KEY);
+CREATE TABLE round_result            (result    TEXT PRIMARY KEY);
+CREATE TABLE subject_kind            (kind      TEXT PRIMARY KEY);
+CREATE TABLE link_type               (link_type TEXT PRIMARY KEY);
+CREATE TABLE disposition             (value     TEXT PRIMARY KEY);
+CREATE TABLE reviewer_decision       (value     TEXT PRIMARY KEY);
+CREATE TABLE resolution_authority    (value     TEXT PRIMARY KEY);
+CREATE TABLE blocker_kind            (kind      TEXT PRIMARY KEY);
+CREATE TABLE task_state              (state     TEXT PRIMARY KEY);
+CREATE TABLE title_authority         (authority TEXT PRIMARY KEY);
+CREATE TABLE question_reason         (reason    TEXT PRIMARY KEY);
+CREATE TABLE transport_kind          (transport TEXT PRIMARY KEY);
+CREATE TABLE artifact_kind           (kind      TEXT PRIMARY KEY);
+CREATE TABLE artifact_producer       (producer  TEXT PRIMARY KEY);
+CREATE TABLE verification_purpose    (purpose   TEXT PRIMARY KEY);
+CREATE TABLE verification_plan_source(source   TEXT PRIMARY KEY);
+CREATE TABLE verification_status     (status    TEXT PRIMARY KEY);
 ```
 
 Три причины предпочесть это `CHECK (severity IN (...))`:
@@ -108,10 +137,20 @@ INSERT INTO severity_scale(severity, rank) VALUES
 3. Шаг между рангами — 10, чтобы вставка промежуточного уровня не требовала
    переписывать существующие строки.
 
-Так же оформлены: `attempt_outcome`, `round_result`, `branch_state`,
-`campaign_state`, `subject_kind`, `link_type`, `disposition`,
-`reviewer_decision`, `resolution_authority`, `blocker_kind`. Значения — из
-`decision.md`, полный список в §12.
+Значения справочников — из `decision.md` и закрытых контрактов v1, полный список
+в §12. Добавление значения — миграция, а не молчаливое принятие нового текста.
+
+Не являются enum'ами и не получают справочник:
+
+- идентификаторы конфигурации и tagged references (`flow_id`,
+  `logical_session.purpose = lane:<id> | author:stage:<id>`,
+  `artifact_approval.approved_by = human | campaign:<id>`);
+- открытый реестр версионированных событий `run_event.kind`;
+- свободные диагностические детали (`outcome_detail`, `close_reason`,
+  `failure_signature`).
+
+Если поле выглядит как «статус плюс причина», оно разделяется на типизированный
+факт и detail, а не кодируется строкой вида `rejected:<причина>`.
 
 ### 1.5. Что означает «immutable» на практике
 
@@ -133,20 +172,26 @@ SQLite не умеет запрещать UPDATE декларативно. Не�
 ## 2. Карта таблиц
 
 ```
-служебное        schema_migration, service_epoch, instance_lock
+служебное        schema_migration, service_epoch
 прогон           run, branch, stage_execution, step_attempt, attempt_liveness,
                  logical_session, run_event, blocker
 граф             task, task_dependency, task_graph_import
 review-домен     review_subject, review_campaign, review_lane, review_round,
                  author_revision, review_observation, finding,
                  finding_observation_link, finding_round, finding_resolution,
-                 severity_override, reviewer_exposure
+                 severity_override, reviewer_exposure, run_profile_resolution
 человек          human_question, human_answer, notification_outbox,
                  telegram_inbox, telegram_cursor
 артефакты        artifact_revision, artifact_approval, verification_run
-справочники      severity_scale, attempt_outcome, round_result, branch_state,
-                 campaign_state, subject_kind, link_type, disposition,
-                 reviewer_decision, resolution_authority, blocker_kind
+справочники      severity_scale, attempt_outcome, attempt_role,
+                 heartbeat_source, branch_kind, branch_state,
+                 run_terminal_state, campaign_state, review_round_kind,
+                 round_result, subject_kind, link_type, disposition,
+                 reviewer_decision, resolution_authority, resolution_kind,
+                 blocker_kind, task_state, title_authority, question_reason,
+                 transport_kind, artifact_kind, artifact_producer,
+                 verification_purpose, verification_plan_source,
+                 verification_status
 ```
 
 Никаких хранимых агрегатов: `run.state`, `escalation_severity`,
@@ -219,7 +264,7 @@ CREATE TABLE branch (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id     INTEGER NOT NULL REFERENCES run(id),
   public_id  TEXT    NOT NULL,                        -- B-main, B-task-7
-  kind       TEXT    NOT NULL,                        -- pipeline | task
+  kind       TEXT    NOT NULL REFERENCES branch_kind(kind), -- pipeline | task
   task_id    INTEGER REFERENCES task(id),
   state      TEXT    NOT NULL REFERENCES branch_state(state),
   created_at INTEGER NOT NULL,
@@ -256,7 +301,8 @@ CREATE TABLE step_attempt (
   public_id          TEXT    NOT NULL UNIQUE,
   run_id             INTEGER NOT NULL REFERENCES run(id),
   stage_id           INTEGER NOT NULL REFERENCES stage_execution(id),
-  role               TEXT    NOT NULL,                -- author | reviewer | planner | reconciler
+  role               TEXT    NOT NULL REFERENCES attempt_role(role),
+                                                        -- author | reviewer | planner | reconciler
   lane_id            INTEGER REFERENCES review_lane(id),
   session_id         INTEGER REFERENCES logical_session(id),
   -- вход: неизменяем
@@ -306,7 +352,8 @@ CREATE TABLE attempt_liveness (
   started_mono_ns        INTEGER NOT NULL,
   last_heartbeat_mono_ns INTEGER NOT NULL,
   last_heartbeat_at      INTEGER NOT NULL,
-  heartbeat_source       TEXT    NOT NULL    -- stdout | fs
+  heartbeat_source       TEXT    NOT NULL REFERENCES heartbeat_source(source)
+                                             -- stdout | stderr | fs
 );
 ```
 
@@ -418,7 +465,8 @@ CREATE TABLE review_round (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES review_campaign(id),
   round_no    INTEGER NOT NULL,
-  kind        TEXT    NOT NULL,                     -- discovery | fix_check
+  kind        TEXT    NOT NULL REFERENCES review_round_kind(kind),
+                                                   -- discovery | fix_check
   preceding_revision_id INTEGER REFERENCES author_revision(id),
   result      TEXT REFERENCES round_result(result), -- NULL = круг ещё идёт
   opened_at   INTEGER NOT NULL,
@@ -678,7 +726,8 @@ CREATE TABLE finding (
   first_revision       TEXT    NOT NULL,
   first_owner_lane_id  INTEGER NOT NULL REFERENCES review_lane(id),
   title                TEXT    NOT NULL,
-  title_authority      TEXT    NOT NULL DEFAULT 'runtime',   -- runtime | human
+  title_authority      TEXT    NOT NULL DEFAULT 'runtime'
+                      REFERENCES title_authority(authority), -- runtime | human
   title_changed_reason TEXT,
   event_id             INTEGER NOT NULL REFERENCES run_event(id),
   created_at           INTEGER NOT NULL,
@@ -810,11 +859,6 @@ CREATE TABLE resolution_kind (
   resolution_authority TEXT NOT NULL REFERENCES resolution_authority(value),
   closes_period        INTEGER NOT NULL
 );
-INSERT INTO resolution_kind VALUES
-  ('verified_fixed',  'reviewer', 1),
-  ('accepted_reason', 'reviewer', 0),
-  ('policy_closed',   'policy',   0),
-  ('human_decision',  'human',    1);
 
 CREATE TABLE finding_resolution (
   id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1202,7 +1246,8 @@ CREATE TABLE task (
   import_id        INTEGER NOT NULL REFERENCES task_graph_import(id),
   title            TEXT    NOT NULL,
   body             TEXT    NOT NULL,
-  state            TEXT    NOT NULL,          -- pending|ready|running|done|invalidated|cancelled
+  state            TEXT    NOT NULL REFERENCES task_state(state),
+                                             -- pending|ready|running|done|invalidated|cancelled
   carry_over_of    INTEGER REFERENCES task(id),
   created_at       INTEGER NOT NULL,
   closed_at        INTEGER,
@@ -1331,11 +1376,13 @@ SELECT r.id AS run_id,
 FROM run r;
 ```
 
-`idle` в перечне `decision.md` нет — и это не новое состояние, а честное имя для
-положения «активных веток нет, блокировок нет, терминала нет». Оно означает
-ошибку планировщика и должно быть видно, а не маскироваться под `waiting_human`.
-Ровно тот же принцип, что у `invalid_graph`: тишина без причины — дефект, а не
-состояние покоя.
+`idle` теперь явно записан в перечне `decision.md`, но не является штатным
+терминалом: это честное имя для положения «активных веток нет, блокировок нет,
+терминала нет». Оно означает ошибку планировщика и должно быть видно, а не
+маскироваться под `waiting_human`. `cancelling` столь же производен: запрос на
+отмену уже durable, но не все ветки приведены к терминалу. Ровно тот же принцип,
+что у `invalid_graph`: переходное или ошибочное положение показывается, а не
+замалчивается.
 
 ---
 
@@ -1350,7 +1397,8 @@ CREATE TABLE human_question (
   stage_id      INTEGER REFERENCES stage_execution(id),
   campaign_id   INTEGER REFERENCES review_campaign(id),
   finding_id    INTEGER REFERENCES finding(id),
-  reason        TEXT    NOT NULL,      -- cap_exhausted_same | cap_exhausted_new
+  reason        TEXT    NOT NULL REFERENCES question_reason(reason),
+                                       -- cap_exhausted_same | cap_exhausted_new
                                        -- | dispute | contract_error | hang
                                        -- | baseline_red | approval_gate | open_question
                                        -- | reopen_human_closed | reconcile_failed
@@ -1371,7 +1419,7 @@ CREATE TABLE human_answer (
   raw_text      TEXT    NOT NULL,
   chosen_option TEXT,                  -- заполнено = закрытие без участия модели
   interpreted_json TEXT,
-  transport     TEXT    NOT NULL,
+  transport     TEXT    NOT NULL REFERENCES transport_kind(transport),
   update_id     INTEGER,
   received_at   INTEGER NOT NULL,
   UNIQUE (question_id)                 -- инвариант 20: один принятый ответ
@@ -1390,7 +1438,8 @@ CREATE TABLE notification_outbox (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id         INTEGER NOT NULL REFERENCES run(id),
   question_id    INTEGER REFERENCES human_question(id),
-  transport      TEXT    NOT NULL,          -- telegram | cli
+  transport      TEXT    NOT NULL REFERENCES transport_kind(transport),
+                                             -- telegram | cli
   target_ref     TEXT,
   body           TEXT    NOT NULL,
   reply_markup   TEXT,
@@ -1404,7 +1453,7 @@ CREATE TABLE notification_outbox (
 CREATE INDEX ix_outbox_pending ON notification_outbox (id) WHERE sent_at IS NULL;
 
 CREATE TABLE telegram_inbox (
-  transport   TEXT    NOT NULL,
+  transport   TEXT    NOT NULL REFERENCES transport_kind(transport),
   update_id   INTEGER NOT NULL,
   payload     TEXT    NOT NULL,
   received_at INTEGER NOT NULL,
@@ -1413,7 +1462,7 @@ CREATE TABLE telegram_inbox (
 );
 
 CREATE TABLE telegram_cursor (
-  transport   TEXT PRIMARY KEY,
+  transport   TEXT PRIMARY KEY REFERENCES transport_kind(transport),
   next_offset INTEGER NOT NULL
 );
 ```
@@ -1438,7 +1487,8 @@ CREATE TABLE artifact_revision (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id          INTEGER NOT NULL REFERENCES run(id),
   stage_id        INTEGER REFERENCES stage_execution(id),
-  kind            TEXT    NOT NULL,          -- design | breakdown | task_plan
+  kind            TEXT    NOT NULL REFERENCES artifact_kind(kind),
+                                             -- design | breakdown | task_plan
                                              -- | cutoff | verification | notes
   logical_path    TEXT    NOT NULL,
   revision_no     INTEGER NOT NULL,
@@ -1447,7 +1497,8 @@ CREATE TABLE artifact_revision (
                                              -- в другом репозитории
   repo_commit     TEXT,
   produced_by_attempt_id INTEGER REFERENCES step_attempt(id),
-  produced_by     TEXT    NOT NULL,          -- agent | human
+  produced_by     TEXT    NOT NULL REFERENCES artifact_producer(producer),
+                                             -- agent | human
   manifest_json   TEXT    NOT NULL,
   created_at      INTEGER NOT NULL,
   UNIQUE (run_id, logical_path, revision_no)
@@ -1472,16 +1523,21 @@ CREATE TABLE verification_run (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id         INTEGER NOT NULL REFERENCES run(id),
   stage_id       INTEGER REFERENCES stage_execution(id),
-  purpose        TEXT    NOT NULL,           -- baseline | after_fix | final
+  purpose        TEXT    NOT NULL REFERENCES verification_purpose(purpose),
+                                             -- baseline | after_fix | final
   code_sha       TEXT    NOT NULL,
   plan_json      TEXT    NOT NULL,           -- VerificationPlan как прислал агент
-  plan_source    TEXT    NOT NULL,           -- recipe | agent
-  policy_verdict TEXT    NOT NULL,           -- allowed | rejected:<причина>
+  plan_source    TEXT    NOT NULL REFERENCES verification_plan_source(source),
+                                             -- recipe | agent
+  policy_allowed INTEGER NOT NULL CHECK (policy_allowed IN (0, 1)),
+  policy_rejection_reason TEXT,
   result_json    TEXT,                       -- команда → код возврата → вывод
-  status         TEXT,                       -- green | red | error
+  status         TEXT REFERENCES verification_status(status),
+                                             -- green | red | error
   failure_signature TEXT,                    -- для сравнения «та же причина или другая»
   started_at     INTEGER NOT NULL,
-  finished_at    INTEGER
+  finished_at    INTEGER,
+  CHECK ((policy_allowed = 1) = (policy_rejection_reason IS NULL))
 );
 ```
 
@@ -1629,8 +1685,17 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 INSERT INTO attempt_outcome(outcome) VALUES
   ('succeeded'),('interrupted'),('hung'),('transient'),('contract_error'),('failed');
 
+INSERT INTO attempt_role(role) VALUES
+  ('author'),('reviewer'),('planner'),('reconciler');
+
+INSERT INTO heartbeat_source(source) VALUES ('stdout'),('stderr'),('fs');
+
+INSERT INTO branch_kind(kind) VALUES ('pipeline'),('task');
+
 INSERT INTO round_result(result) VALUES
-  ('clean'),('needs_revision'),('disputed'),('escalated');
+  ('clean'),('needs_revision'),('escalated');
+
+INSERT INTO review_round_kind(kind) VALUES ('discovery'),('fix_check');
 
 INSERT INTO branch_state(state) VALUES
   ('ready'),('running'),('retry_wait'),('blocked'),('done'),('failed'),('cancelled');
@@ -1641,6 +1706,9 @@ INSERT INTO run_terminal_state(state) VALUES
 INSERT INTO campaign_state(state) VALUES
   ('discovery'),('reconciliation'),('fix_cycle'),('closed_clean'),
   ('closed_escalated'),('closed_cancelled');
+
+INSERT INTO task_state(state) VALUES
+  ('pending'),('ready'),('running'),('done'),('invalidated'),('cancelled');
 
 INSERT INTO subject_kind(kind) VALUES ('code'),('artifact'),('task'),('stage');
 
@@ -1654,8 +1722,35 @@ INSERT INTO reviewer_decision(value) VALUES
 
 INSERT INTO resolution_authority(value) VALUES ('reviewer'),('human'),('policy');
 
+INSERT INTO resolution_kind VALUES
+  ('verified_fixed',  'reviewer', 1),
+  ('accepted_reason', 'reviewer', 0),
+  ('policy_closed',   'policy',   0),
+  ('human_decision',  'human',    1);
+
 INSERT INTO blocker_kind(kind) VALUES
   ('human_question'),('awaiting_continue'),('dependency'),('drift'),('invalid_graph');
+
+INSERT INTO title_authority(authority) VALUES ('runtime'),('human');
+
+INSERT INTO question_reason(reason) VALUES
+  ('cap_exhausted_same'),('cap_exhausted_new'),('dispute'),('contract_error'),
+  ('hang'),('baseline_red'),('approval_gate'),('open_question'),
+  ('reopen_human_closed'),('reconcile_failed'),('lane_failure'),
+  ('verification_policy');
+
+INSERT INTO transport_kind(transport) VALUES ('telegram'),('cli');
+
+INSERT INTO artifact_kind(kind) VALUES
+  ('design'),('breakdown'),('task_plan'),('cutoff'),('verification'),('notes');
+
+INSERT INTO artifact_producer(producer) VALUES ('agent'),('human');
+
+INSERT INTO verification_purpose(purpose) VALUES ('baseline'),('after_fix'),('final');
+
+INSERT INTO verification_plan_source(source) VALUES ('recipe'),('agent');
+
+INSERT INTO verification_status(status) VALUES ('green'),('red'),('error');
 ```
 
 ---
@@ -1778,10 +1873,22 @@ immutable-записей и пересчёт всегда даст тот же �
    должна быть либо `NOT NULL` в объявлении, либо явно проверена внутри самого
    констрейнта; любой `CASE` в CHECK обязан иметь `ELSE`.
 2. **Правило, верно сформулированное текстом, ломается при переводе в SQL — и
-   это самый частый дефект здесь.** Три ошибки из шести именно такие: `MAX`
+   это самый частый дефект здесь.** Три ошибки из восьми именно такие: `MAX`
    вместо `MIN`, отсутствие отсечки у override, одно представление вместо двух.
    Ни одну из них не поймал бы тест чистой функции домена — они живут на шве.
    Отсюда задача T1.7b в плане работ: вертикальный срез на настоящей базе.
+
+### Правки дополнительного ревью перед реализацией
+
+- `disputed` удалён из `round_result`: спор ниже порога хранится как
+  `policy_closed`, а итог круга определяется оставшимися открытыми findings;
+- закрытые enum-наборы получили реальные справочные таблицы и FK, а tagged/open
+  значения явно отделены от enum;
+- добавлены отсутствовавшие определения `run_terminal_state` и остальных
+  справочников; карта таблиц синхронизирована с DDL;
+- `policy_verdict = rejected:<reason>` разложен на типизированный
+  `policy_allowed` и отдельный `policy_rejection_reason`;
+- связная DDL выполнена целиком, а не только отдельными фрагментами.
 
 Отдельно стоит отметить, что **`run_event.id` получил вторую роль** — общего
 монотонного порядка, на котором стоит вычисление периода открытости. §6.3

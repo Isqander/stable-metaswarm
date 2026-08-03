@@ -1,6 +1,6 @@
 # Контракты агентов
 
-Дата: 2026-08-03. Статус: содержательно закрыты после трёх раундов внешнего
+Дата: 2026-08-03. Статус: содержательно закрыты после четырёх раундов внешнего
 ревью; реальным рантаймом не проверены.
 
 Что рантайм даёт агенту на вход и что обязан получить на выходе. Всё, что не
@@ -85,7 +85,7 @@ evidence подтягиваются только для тех ID, которы�
 ```
 OPEN FINDINGS
   F-12  high      Race between checkpoint commit and state flush   awaiting_fix
-  F-19  medium    Missing index on blocker(run_id)                  disputed
+  F-19  medium    Missing index on blocker(run_id)                  awaiting_fix
   F-23  low       Inconsistent error wording                        awaiting_fix
 ```
 

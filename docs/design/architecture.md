@@ -1,6 +1,6 @@
 # Архитектура
 
-Дата: 2026-08-03. Статус: содержательно закрыта после трёх раундов внешнего
+Дата: 2026-08-03. Статус: содержательно закрыта после четырёх раундов внешнего
 ревью и проверки M0; production-реализацией не проверена.
 
 Верхнеуровневая архитектура системы целиком: границы, компоненты, процессы,
@@ -388,8 +388,12 @@ stateDiagram-v2
   fix_cycle --> fix_cycle: правка автора → проверка → needs_revision
   fix_cycle --> closed_clean: проверка вернула clean
   fix_cycle --> closed_escalated: спор ≥ порога, либо правки исчерпаны
+  discovery --> closed_cancelled: отмена прогона
+  reconciliation --> closed_cancelled: отмена прогона
+  fix_cycle --> closed_cancelled: отмена прогона
   closed_clean --> [*]
   closed_escalated --> [*]
+  closed_cancelled --> [*]
 ```
 
 ### 6.3. Решение о продолжении цикла
@@ -399,27 +403,30 @@ stateDiagram-v2
 функцией без ветвлений в других местах.
 
 ```python
-def decide_after_check(result, campaign, counters, stage) -> Decision:
-    # 1. Чистая проверка — успех при любых счётчиках.
+def decide_after_check(campaign, counters, stage) -> Decision:
+    # Решение одновременно задаёт переход и сохраняемый round_result.
+
+    # 1. Открытых findings нет — успех при любых счётчиках.
     #    В том числе если это была четвёртая проверка.
-    if result is CLEAN:
-        return CloseCampaign(success=True)
+    if not has_open_findings(campaign):
+        return CloseCampaign(success=True, round_result=CLEAN)
 
     # 2. Спор не ниже порога уходит человеку СРАЗУ, не дожидаясь
     #    исчерпания кругов.
     if dispute := find_escalating_dispute(campaign, stage.severity_threshold):
-        return AskHuman(reason="dispute", snapshot=dispute.snapshot())
+        return AskHuman(reason="dispute", snapshot=dispute.snapshot(),
+                        round_result=ESCALATED)
 
-    # 3. Правки ещё есть — следующий круг.
+    # 3. Открытые findings есть, правки ещё есть — следующий круг.
     if counters.author_revision_count < stage.max_author_revisions:
-        return StartAuthorRevision()
+        return StartAuthorRevision(round_result=NEEDS_REVISION)
 
     # 4. Правки исчерпаны. Причина различается по кругу первого
     #    появления открытых замечаний.
     reason = ("cap_exhausted_new"
               if any_finding_first_seen_in_last_round(campaign)
               else "cap_exhausted_same")
-    return AskHuman(reason=reason)
+    return AskHuman(reason=reason, round_result=ESCALATED)
 
 
 def decide_after_revision(...) -> Decision:
@@ -478,11 +485,11 @@ stateDiagram-v2
 закрывают только `verified_fixed` и решение человека. Это два разных жизненных
 цикла одной записи, и в схеме они разведены (`db-schema.md` §5.6).
 
-### 6.6. Спор ниже порога: от результата круга до закрытия замечания
+### 6.6. Спор ниже порога: от решения ревьюера до закрытия замечания
 
-Путь `disputed → policy_closed` собирается из трёх разных мест документа, и
-именно поэтому его стоит показать одной последовательностью — он единственный, где
-замечание закрывается **без** участия ревьюера, автора или человека.
+Путь `insists → policy_closed` собирается из трёх разных мест документа, и
+именно поэтому его стоит показать одной последовательностью — он единственный,
+где замечание закрывается **без** согласия ревьюера, автора или человека.
 
 ```
 ревьюер: insists на отказ автора
@@ -495,7 +502,11 @@ stateDiagram-v2
           → finding_resolution: resolution = 'policy_closed',
                                 authority   = 'policy',
                                 closes_severity_period = 0
-          → замечание закрыто, круг result = 'disputed'
+          → замечание закрыто
+          → после обработки всех findings:
+                открытых нет                 → clean, кампания завершена
+                спор ≥ порога или кап исчерпан → escalated, вопрос человеку
+                иначе остались открытые       → needs_revision, правка автора
           → в CLI попадает в список «автоматически принятые отказы»
 ```
 
@@ -505,9 +516,11 @@ stateDiagram-v2
   задавленный порогом сегодня, всплывёт сам, если завтра evidence станет
   серьёзнее: новое наблюдение поднимет `escalation_severity` до порога, и вопрос
   человеку возникнет штатно, **впервые**.
-- **`disputed` не мешает кампании завершиться.** Если открытых замечаний не
-  осталось, следующая проверка вернёт `clean`, и стадия успешна — при том, что
-  какие-то замечания были закрыты политикой, а не согласием.
+- **Отдельного результата круга `disputed` нет.** Факт спора уже хранится как
+  `policy_closed`; дублировать его агрегатом круга не нужно. Если открытых
+  замечаний не осталось, текущий круг получает `clean` и сразу завершает
+  кампанию. Дополнительная проверка невозможна и не нужна: новой
+  `author_revision`, которую она могла бы проверять, не было.
 - **Отсюда важность CLI-отчёта.** Автоматически принятые отказы показываются
   отдельным списком (`decision.md` §12) именно потому, что в остальном они
   невидимы: ветка едет, прогон успешен, а ревьюер при этом настаивал. Систематический
