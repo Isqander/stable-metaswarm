@@ -123,9 +123,9 @@ flowchart TB
 | Пакет | Задачи | Вход | Выходной рубеж | Что проверяет совместное ревью |
 |---|---|---|---|---|
 | **P1-A · review core** | T1.1–T1.7 и T1.7b | M0 закрыт | **M1 + M1b:** findings-протокол проходит на чистой логике и настоящей SQLite без процессов агентов | Владение правилами между DDL, репозиториями, доменом и валидатором; единые типы/ID; транзакционная граница вертикального среза |
-| **P1-B · process boundary** | T1.8, T1.9, T1.10a, T1.11 | P1-A | Процесс CLI управляем, liveness и recovery попыток проверены; readiness не обходит гашение сирот | Adapter outcome → attempt outcome; heartbeat и бюджеты; порядок recovery → readiness; отсутствие зависимости от ещё не написанных effects |
+| **P1-B · process boundary** | T1.8, T1.9, T1.10a, T1.11 | P1-A | Процесс CLI управляем, liveness и recovery попыток проверены; readiness не обходит гашение сирот | Adapter outcome → attempt outcome; heartbeat и бюджеты; порядок recovery попыток/orphan kill → readiness; recovery audit внешних эффектов остаётся в P1-C |
 | **P1-C · durable effects** | T1.12, T1.13, T1.14, T1.16, T1.10b | P1-A + P1-B | **M2:** git, артефакты, verification, human/outbox и их recovery переживают убийство | Intent/effect/compensate на каждом внешнем эффекте; digest/idempotency; атомарность вопроса и блокировки; единая политика reset/retry |
-| **P1-D · orchestration** | T1.17–T1.22a, кроме T1.15 | P1-A–P1-C | **M3:** флоу 1 и достижимые сценарии §14 проходят на fake CLI | Config → scheduler → IPC → flow; drift до запуска; hash промптов/рубрик; достижимость всех приёмочных сценариев без real vendor |
+| **P1-D · orchestration** | T1.17–T1.22a | P1-A–P1-C | **M3:** флоу 1 и достижимые сценарии §14 проходят на fake CLI | Config → scheduler → IPC → flow; drift до запуска; hash промптов/рубрик; достижимость всех приёмочных сценариев без real vendor |
 | **P1-E · real environment** | T1.23 и независимо T1.15 | M3 | **M4:** два стабильных real-CLI прогона; Telegram готов, если включён в пакет реализации | Fake/real parity, критерий останова притирки промптов, отсутствие зависимости домена от транспорта |
 
 `T1.15` допускается планировать вместе с P1-E, но он не является входом T1.23 и
