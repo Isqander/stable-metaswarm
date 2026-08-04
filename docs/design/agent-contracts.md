@@ -538,6 +538,10 @@ Campaign/order/effective severity защищает база; принадлеж�
 `&&`, `|`, `$(...)`, `>` и подстановки переменных не интерпретируются и являются
 поводом для отказа политики.
 
+`steps` обязан содержать хотя бы один шаг, а `rationale` — непустое объяснение
+выбора. Пустой план не означает «проверять нечего»: он создаёт ложный зелёный
+результат и потому отклоняется как `contract_error` до policy check.
+
 Дальше план не исполняется агентом. Его исполняет детерминированный сервис,
 проверив каждый шаг (`architecture.md` §10). Это единственное место во всей
 системе, где команды, придуманные моделью, исполняются кодом, — и потому
@@ -743,10 +747,11 @@ severity вне enum · `unchanged_from` в слепой фазе · `unchanged_
 лимита · follow-up observation при `verified_fixed`/`accepted_reason` ·
 follow-up observation с `unchanged_from` другого finding или периода.
 
-**План верификации:** `argv` строкой или пуст · неизвестный `expect` ·
-неположительный `step_timeout_s` — `contract_error`; shell-синтаксис · `cwd`
-вне разрешённого · исполняемое вне allowlist · путь из denylist · адрес
-production-среды — `VerificationPolicyRejection` и вопрос человеку, а не retry.
+**План верификации:** пустой `steps`/`rationale` · `argv` строкой или пуст ·
+неизвестный `expect` · неположительный `step_timeout_s` — `contract_error`;
+shell-синтаксис · `cwd` вне разрешённого · исполняемое вне allowlist · путь из
+denylist · адрес production-среды — `VerificationPolicyRejection` и вопрос
+человеку, а не retry.
 
 **Граф:** дубль ID · висячее ребро · self-edge · цикл · дубль ребра.
 
