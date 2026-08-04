@@ -721,7 +721,10 @@ END;
 Target follow-up observation уже задан внешним `finding_id`, поэтому T1.6
 проверяет finding и период до вставки, а T1.7b пишет observation и
 `recurrence` в одной транзакции с решением. Нарушение даёт `contract_error` и
-не оставляет observation без link. Это выбор B в Q45.
+не оставляет observation без link. Такой direct path допустим только при
+`reviewer_decision IN ('still_present', 'insists')`: `verified_fixed` и
+`accepted_reason` закрывают finding и не могут одновременно нести его
+`recurrence`. Это выбор B в Q45 и необходимая проверка согласованности решения.
 
 **Где `unchanged_from` вообще возможен.** В фазе `blind_discovery` ревьюер не
 видит ledger и не знает ID прежних наблюдений — сослаться ему не на что, и любое
@@ -814,7 +817,7 @@ target уже известен:
 | Классификация / источник | `link_type` | Что делает с кругом |
 |---|---|---|
 | `new` | `first_seen` | Входит в текущий круг, создаётся новый ID |
-| `existing_open(id)` либо follow-up observation решения по известному ID | `recurrence` | Входит в текущий круг; во втором случае target задаёт внешний `finding_id` без reconciliation |
+| `existing_open(id)` либо follow-up observation при `still_present`/`insists` по известному ID | `recurrence` | Входит в текущий круг; во втором случае target задаёт внешний `finding_id` без reconciliation |
 | `reaffirmed_closed(id)` | `reaffirmation` | Круга не порождает; допустим только после `accepted_reason` |
 | `reopen_closed(id, reason)` | `reopening` | Переводит закрытое в текущий круг |
 
@@ -1638,7 +1641,7 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | # | Инвариант | Держит | Чем |
 |---|---|---|---|
 | 1 | Каждое открытое замечание закрыто явным статусом | **Код** | Проверка покрытия открытых ID до записи dispositions; круг не закрывается частично |
-| 2 | Каждое наблюдение получает ровно одну связь: через reconciliation либо детерминированную `recurrence` известного target | **База + код** | `finding_observation_link.observation_id` PK — не даст двух связей; полнота — глобальный запрос перед `review_round.result` |
+| 2 | Каждое наблюдение получает ровно одну связь: через reconciliation либо детерминированную `recurrence` известного target только при `still_present`/`insists` | **База + код** | `finding_observation_link.observation_id` PK — не даст двух связей; допустимость решения и полнота — код до транзакции и глобальный запрос перед `review_round.result` |
 | 3 | `existing_open` — только открытый ID; `reaffirmed_closed` — только закрытый через `accepted_reason`; `reopen_closed` — любой закрытый ID | **Код** | Валидация на приёме по `finding_status`: status и `last_resolution` проверяются до записи |
 | 4 | Счётчиков два, независимы; настраивается только `max_author_revisions` | **База** | `campaign_counters` — представление; хранимых счётчиков нет, второй ручки нет |
 | 5 | Оба растут только после `succeeded` | **База + код** | `author_revision` — составные FK `(attempt_id, role)` и `(attempt_id, outcome)`; `review_check_count` считает `review_round.result`, который база с попыткой связать не может — см. ниже |
@@ -1715,7 +1718,8 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 перехода машины состояний, но тоже неделима: follow-up `review_observation`
 из `decisions[*]` + direct link `recurrence` + `finding_round.reviewer_decision`
 и соответствующее resolution/human-следствие + `run_event`. Невалидный
-`unchanged_from` откатывает всю операцию. `new_observations` могут остаться
+`unchanged_from` либо follow-up при закрывающем `verified_fixed`/
+`accepted_reason` отклоняет ответ до операции. `new_observations` могут остаться
 непривязанными только пока отдельный reconciliation ещё не завершён; записать
 `review_round.result` в таком состоянии запрещает глобальный гейт §5.4.
 
@@ -1970,6 +1974,21 @@ discovery и `new_observations` с неизвестной личностью п�
 `review_round.result`; в открытом круге recovery трактует такие строки как
 незавершённый reconciliation, а не как готовый повреждённый результат. DDL
 менять не потребовалось: link уже хранит target, тип, attempt и event.
+
+**14. Direct follow-up совместим только с решением, оставляющим finding
+открытым.** Первая редакция варианта B разрешала вложенный observation при любом
+`reviewer_decision`. Поэтому база принимала противоречивое состояние:
+`verified_fixed` или `accepted_reason` закрывал finding, а `recurrence` в той же
+транзакции утверждала, что проблема снова наблюдается; completeness gate этого
+не замечал, а `escalation_severity` закрытого периода становилась `NULL`.
+
+Контракт уточнён без новой развилки: follow-up observation допустим только при
+`still_present` и `insists`, уже определённых как решения, оставляющие finding
+открытым. При `verified_fixed`/`accepted_reason` ответ отклоняется как
+`contract_error`; отдельная проблема должна идти через `new_observations`.
+Проверку формы выполняет T1.7 до записи, T1.7b доказывает атомарность и отказ на
+реальной базе. DDL не менялась: это межстрочный инвариант входного payload,
+который SQLite не выражает, пока observation ещё не вставлен.
 
 ### Что было неверно в первой редакции этого документа
 

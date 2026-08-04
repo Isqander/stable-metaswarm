@@ -3,7 +3,8 @@
 Дата: 2026-08-04. Статус: после дополнительного ревью T1.5 исправлена
 достижимость `cap_exhausted_new`, защищённый вопрос Q44 закрыт явным решением
 владельца, для follow-up observations выбран вариант B в Q45.
-Production-реализацией не проверена.
+Контрольное ревью уточнило, что direct path допустим только при решении,
+оставляющем finding открытым. Production-реализацией не проверена.
 
 Верхнеуровневая архитектура системы целиком: границы, компоненты, процессы,
 потоки управления, машины состояний, обработка отказов. Что и почему решено —
@@ -439,9 +440,12 @@ stateDiagram-v2
 Перед `decide_after_check` текущий `fix_check` обязан завершить ещё один шов.
 Каждый владелец finding'а возвращает решения по выданным ему ID и может
 добавить два разных вида evidence. Follow-up observation внутри решения уже
-имеет target во внешнем `finding_id`: T1.6 проверяет `unchanged_from` на тот же
-finding и период, а T1.7b пишет observation и `recurrence` одной транзакцией с
-решением. Только `new_observations` без известной личности идут в T1.5. Если они
+имеет target во внешнем `finding_id` и разрешён только вместе со
+`still_present`/`insists`, которые оставляют finding открытым. Сочетание с
+`verified_fixed`/`accepted_reason` отклоняется до записи. Для допустимого
+follow-up T1.6 проверяет `unchanged_from` на тот же finding и период, а T1.7b
+пишет observation и `recurrence` одной транзакцией с решением. Только
+`new_observations` без известной личности идут в T1.5. Если они
 есть, T1.5 проводит reconciliation на этом же `review_round` и на
 **post-decision ledger**: все валидные `verified_fixed`/`accepted_reason` этого
 check уже отражены в status. Поэтому finding, только что закрытый решением,
@@ -629,7 +633,7 @@ stateDiagram-v2
      ├─ TX: finding_round.disposition (все или ни одного)
      │       + author_revision + attempt.outcome
      ├─ владельцу каждого finding'а: проверить исправление или отказ;
-     │  ответ может содержать follow-up observation известного ID
+     │  still_present/insists может содержать follow-up observation известного ID
      │  и отдельные new_observations
      ├─ TX: finding_round.reviewer_decision
      │       + follow-up observation + recurrence после проверки T1.6
