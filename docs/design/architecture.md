@@ -4,7 +4,8 @@
 достижимость `cap_exhausted_new`, защищённый вопрос Q44 закрыт явным решением
 владельца, для follow-up observations выбран вариант B в Q45.
 Контрольное ревью уточнило, что direct path допустим только при решении,
-оставляющем finding открытым. Production-реализацией не проверена.
+оставляющем finding открытым; Q46 фиксирует полный список одновременных споров
+в одном human gate. Production-реализацией не проверена.
 
 Верхнеуровневая архитектура системы целиком: границы, компоненты, процессы,
 потоки управления, машины состояний, обработка отказов. Что и почему решено —
@@ -459,30 +460,32 @@ findings в facts текущей проверки. После обоих пут�
 здесь — подшаг круга, а не состояние кампании.
 
 ```python
-def decide_after_check(campaign, counters, stage) -> Decision:
+def decide_after_check(facts: CheckFacts) -> Decision:
     # Решение одновременно задаёт переход и сохраняемый round_result.
-    assert campaign.state == FIX_CYCLE
+    assert facts.campaign_state == FIX_CYCLE
 
     # 1. Открытых findings нет — успех при любых счётчиках.
     #    В том числе если это была четвёртая проверка.
-    if not has_open_findings(campaign):
+    if not facts.open_findings:
         return CloseCampaign(success=True, round_result=CLEAN,
                              campaign_state=CLOSED_CLEAN)
 
     # 2. Спор не ниже порога уходит человеку СРАЗУ, не дожидаясь
-    #    исчерпания кругов.
-    if dispute := find_escalating_dispute(campaign, stage.severity_threshold):
-        return AskHuman(reason="dispute", snapshot=dispute.snapshot(),
+    #    исчерпания кругов. T1.6 уже собрал полный ordered aggregate,
+    #    T1.7b лишь отобразил его в CheckFacts.
+    if facts.escalating_disputes:
+        return AskHuman(reason="dispute", snapshot=facts.escalating_disputes,
                         round_result=ESCALATED, campaign_state=FIX_CYCLE)
 
     # 3. Открытые findings есть, правки ещё есть — следующий круг.
-    if counters.author_revision_count < stage.max_author_revisions:
+    if facts.counters.author_revision_count < facts.max_author_revisions:
         return StartAuthorRevision(round_result=NEEDS_REVISION)
 
     # 4. Правки исчерпаны. Причина различается по кругу первого
     #    появления открытых замечаний.
     reason = ("cap_exhausted_new"
-              if any_finding_first_seen_in_last_round(campaign)
+              if any(f.first_round_id == facts.current_round_id
+                     for f in facts.open_findings)
               else "cap_exhausted_same")
     return AskHuman(reason=reason, round_result=ESCALATED,
                     campaign_state=FIX_CYCLE)
@@ -591,6 +594,12 @@ stateDiagram-v2
   отдельным списком (`decision.md` §12) именно потому, что в остальном они
   невидимы: ветка едет, прогон успешен, а ревьюер при этом настаивал. Систематический
   перекос порога виден только в этом списке.
+
+Если ветка `>= порога` сработала для нескольких findings одного check, T1.6
+возвращает их все: severity по убыванию, затем `finding_id`. T1.4 открывает один
+human gate, а T1.7b сохраняет один campaign-level вопрос со всем списком в
+`snapshot_json`. Выбирать один «главный» спор запрещено: окончательный human
+answer относится к кампании целиком.
 
 ---
 
