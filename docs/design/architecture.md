@@ -400,8 +400,9 @@ stateDiagram-v2
   reconciliation --> fix_cycle: наблюдения классифицированы, ID выданы
   reconciliation --> closed_clean: наблюдений нет
   fix_cycle --> fix_cycle: правка автора → проверка → needs_revision
+  fix_cycle --> fix_cycle: escalated → ждём человека; разрешена правка → продолжаем
   fix_cycle --> closed_clean: проверка вернула clean
-  fix_cycle --> closed_escalated: спор ≥ порога, либо правки исчерпаны
+  fix_cycle --> closed_escalated: человек принял результат или остановил ветку
   discovery --> closed_cancelled: отмена прогона
   reconciliation --> closed_cancelled: отмена прогона
   fix_cycle --> closed_cancelled: отмена прогона
@@ -409,6 +410,13 @@ stateDiagram-v2
   closed_escalated --> [*]
   closed_cancelled --> [*]
 ```
+
+`escalated` сначала закрывает **круг**, но не кампанию: пока открыт
+`human_question`, `review_campaign.state = fix_cycle` и `closed_at IS NULL`, а
+ветку удерживает blocker. Если человек разрешает ещё одну правку, увеличивается
+лимит стадии и та же кампания продолжает self-transition с прежними счётчиками.
+`closed_escalated` выставляется только после окончательного ответа «принять» или
+«остановить» и потому действительно остаётся терминальным.
 
 ### 6.3. Решение о продолжении цикла
 
@@ -423,13 +431,14 @@ def decide_after_check(campaign, counters, stage) -> Decision:
     # 1. Открытых findings нет — успех при любых счётчиках.
     #    В том числе если это была четвёртая проверка.
     if not has_open_findings(campaign):
-        return CloseCampaign(success=True, round_result=CLEAN)
+        return CloseCampaign(success=True, round_result=CLEAN,
+                             campaign_state=CLOSED_CLEAN)
 
     # 2. Спор не ниже порога уходит человеку СРАЗУ, не дожидаясь
     #    исчерпания кругов.
     if dispute := find_escalating_dispute(campaign, stage.severity_threshold):
         return AskHuman(reason="dispute", snapshot=dispute.snapshot(),
-                        round_result=ESCALATED)
+                        round_result=ESCALATED, campaign_state=FIX_CYCLE)
 
     # 3. Открытые findings есть, правки ещё есть — следующий круг.
     if counters.author_revision_count < stage.max_author_revisions:
@@ -440,7 +449,8 @@ def decide_after_check(campaign, counters, stage) -> Decision:
     reason = ("cap_exhausted_new"
               if any_finding_first_seen_in_last_round(campaign)
               else "cap_exhausted_same")
-    return AskHuman(reason=reason, round_result=ESCALATED)
+    return AskHuman(reason=reason, round_result=ESCALATED,
+                    campaign_state=FIX_CYCLE)
 
 
 def decide_after_revision(...) -> Decision:
@@ -459,6 +469,12 @@ def decide_after_revision(...) -> Decision:
 `review_check_count <= max_author_revisions + 1` — assert в конце транзакции, а
 не второй гейт. Если он сработал, это дефект планировщика, а не ситуация,
 которую надо обработать.
+
+`AskHuman` в этой функции — решение «закрыть круг и поставить human gate», а не
+`CloseCampaign`: round получает `escalated`, campaign остаётся `fix_cycle`.
+Ответ человека обрабатывает T1.16. Вариант «ещё одна правка» увеличивает
+`stage_execution.max_author_revisions` и продолжает ту же кампанию; два
+окончательных варианта переводят её в `closed_escalated`.
 
 ### 6.4. Ветка
 
@@ -585,8 +601,12 @@ stateDiagram-v2
      │       + review_round.result + событие
      └─ decide_after_check(...) → следующий круг | успех | человек
 
-5. Закрытие
-   └─ TX: campaign.state + stage.state + branch.state + событие
+5. Закрытие или human gate
+   ├─ clean: TX campaign=closed_clean + stage/branch + событие
+   ├─ escalated: TX round=escalated + вопрос/outbox/blocker + событие;
+   │             campaign остаётся fix_cycle
+   └─ окончательный ответ человека: TX campaign=closed_escalated
+                 + stage/branch + resolutions + событие
 ```
 
 Шаг 3 — единственное место, где ID выдаётся. Личность **никогда** не
@@ -656,6 +676,12 @@ stateDiagram-v2
 Останавливается при этом **только эта ветка**. Соседние независимые работали всё
 время и продолжают; `Run` вычисляется из веток и остаётся `running`. Глобальный
 `paused` бывает ровно один — когда человек сам поставил прогон на паузу.
+
+Для review-вопроса ответ меняет и кампанию. «Ещё одна правка» атомарно
+увеличивает `stage_execution.max_author_revisions`, оставляет кампанию в
+`fix_cycle` и ставит `awaiting_continue`; «принять» или «остановить» переводит
+кампанию в терминальный `closed_escalated` вместе с соответствующим состоянием
+стадии/ветки. Сам факт ожидания состоянием `closed_escalated` не кодируется.
 
 ### 7.3. Убийство и продолжение
 
@@ -875,7 +901,7 @@ cwd классифицируется до vendor exit. TERM посылается
 | Проверка | Отказ |
 |---|---|
 | `cwd` внутри агентского клона или checkout верификации | `rejected:cwd_outside` |
-| `argv` — список, без shell, без `&&`, `|`, `$(...)` | `rejected:shell_syntax` |
+| `argv` — список, без shell, без `&&`, `\|`, `$(...)` | `rejected:shell_syntax` |
 | Исполняемое имя в allowlist проекта | `rejected:executable` |
 | Нет путей из denylist (прод-конфиги, каталоги с секретами) | `rejected:path` |
 | Нет сетевых адресов прод-сред | `rejected:target` |

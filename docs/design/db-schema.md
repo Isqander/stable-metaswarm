@@ -458,6 +458,14 @@ CREATE TABLE review_lane (
 отвечается без пересчёта. Если порог живёт только в конфиге, а конфиг между
 остановкой и `continue` поменялся, снапшот врёт.
 
+**Открытый human gate не закрывает кампанию.** Когда проверка даёт
+`round_result = 'escalated'`, но человек ещё не ответил,
+`review_campaign.state` остаётся `fix_cycle`, а `closed_at` — `NULL`; ожидание
+держат `human_question` и blocker ветки. `closed_escalated` выставляется только
+после окончательного ответа «принять как есть» или «остановить ветку». Ответ
+«разрешить ещё одну правку» увеличивает `stage_execution.max_author_revisions`
+и продолжает ту же кампанию с накопленными счётчиками.
+
 ```sql
 -- Круг = одна проверка. Первичный кворум — круг 1.
 -- Последовательность: check1 → rev1 → check2 → rev2 → check3 → rev3 → check4.
@@ -1439,6 +1447,12 @@ CREATE TABLE human_answer (
 против `cap_exhausted_new` — это два разных вопроса человеку с разными
 вариантами.
 
+При этих review-причинах открытая строка `human_question` вместе с blocker'ом
+является состоянием ожидания. Она намеренно не дублируется значением
+`review_campaign.state`: кампания остаётся в `fix_cycle`, чтобы разрешённая
+человеком дополнительная правка продолжила тот же цикл, а не создала кампанию с
+обнулёнными счётчиками.
+
 ```sql
 -- Транспортно-нейтрален: домен пишет сюда, не зная про Telegram.
 -- target_ref интерпретирует транспорт (chat_id для Telegram, NULL для CLI).
@@ -1674,11 +1688,11 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | Переход | Таблицы в одной транзакции |
 |---|---|
 | Задан вопрос человеку | `human_question` + `notification_outbox` + `blocker` + `run_event` |
-| Получен ответ | `telegram_inbox.handled_at` + `human_answer` + `blocker.cleared_at` + новый `blocker(awaiting_continue)` + `branch.state` + `run_event` |
+| Получен ответ | `telegram_inbox.handled_at` + `human_answer` + `blocker.cleared_at` + новый `blocker(awaiting_continue)` + `branch.state` + review-следствие (`stage_execution.max_author_revisions += 1` при дополнительной правке либо `review_campaign.state='closed_escalated'` при окончательном ответе) + `run_event` |
 | Задача выполнена | `step_attempt.outcome` + `task.state='done'` + пересчёт готовности зависимых + `run_event` |
-| Круг ревью закрыт | Все `finding_round` круга + `review_round.result` + `review_campaign.state` + `finding_resolution` по закрытым + `run_event` |
+| Круг ревью закрыт | Все `finding_round` круга + `review_round.result` + `finding_resolution` по закрытым + состояние кампании (`closed_clean` при успехе; прежний `fix_cycle` при `escalated` до ответа человека) + `run_event` |
 | Импорт графа | `task_graph_import` + `task` + `task_dependency` + инвалидация задач прежней ревизии + `run_event` |
-| Эскалация | `human_question(snapshot_json)` + `notification_outbox` + `blocker` + `run_event` |
+| Эскалация | `review_round.result='escalated'` + `human_question(snapshot_json)` + `notification_outbox` + `blocker` + сохранённый `review_campaign.state='fix_cycle'` + `run_event` |
 
 Обратите внимание на второй: **на место снятой блокировки `human_question`
 ставится `awaiting_continue`** — в той же транзакции. Иначе между снятием одной
@@ -1789,7 +1803,7 @@ INSERT INTO verification_status(status) VALUES ('green'),('red'),('error');
 
 ## 14. Уточнения к `decision.md`
 
-Проектирование схемы обнаружило восемь мест, где решение чего-то не учло, и одну
+Проектирование схемы обнаружило девять мест, где решение чего-то не учло, и одну
 возможность (пункт 5). Ни одно из
 принятых решений не отменяется — но без этих уточнений часть из них
 нереализуема.
@@ -1833,7 +1847,7 @@ immutable-записей и пересчёт всегда даст тот же �
 порога эскалации становится индексированным `MAX(rank)` вместо рекурсивного CTE
 на каждом чтении.
 
-Пункты 1–4 и 6–8 **перенесены в `decision.md`** и живут там как принятые
+Пункты 1–4 и 6–9 **перенесены в `decision.md`** и живут там как принятые
 решения, а не как уточнения второго слоя: все они меняют семантику, а не форму.
 Здесь они остаются с обоснованием, почему потребовались.
 
@@ -1858,6 +1872,16 @@ immutable-записей и пересчёт всегда даст тот же �
 видел, но остался бы «свежим». Значит фактическая пара provider+model обязана
 резолвиться заранее (`run_profile_resolution`), а расхождение с ответом
 трактуется как дрейф, а не как повод отложить запись.
+
+**9. Human gate — не терминал кампании.** Диаграмма первой редакции переводила
+кампанию в `closed_escalated` сразу при исчерпании капа или споре выше порога,
+но §8 разрешает человеку добавить одну правку и продолжить цикл. Новая кампания
+не сохраняет счётчики старой, а обратный переход из состояния `closed_*` ломает
+сам смысл терминала. Поэтому до ответа человека кампания остаётся в
+`fix_cycle`, текущий круг закрывается как `escalated`, а остановку выражают
+`human_question` и blocker ветки. `closed_escalated` появляется только после
+окончательного ответа «принять» или «остановить»; дополнительная правка
+увеличивает лимит стадии и продолжает ту же кампанию.
 
 ### Что было неверно в первой редакции этого документа
 
