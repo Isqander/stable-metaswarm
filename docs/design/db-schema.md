@@ -1238,6 +1238,8 @@ SELECT r.provider, r.model
 
 ## 6. Граф, блокировки, события
 
+### 6.1. Задачи, зависимости и импорт графа
+
 ```sql
 CREATE TABLE task (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1296,6 +1298,8 @@ CREATE TABLE task_graph_import (
 циклом и recovery audit не остаётся. Тот же обход гоняется в recovery audit как
 дешёвая страховка.
 
+### 6.2. Блокировки
+
 ```sql
 CREATE TABLE blocker (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1319,6 +1323,8 @@ CREATE INDEX ix_blocker_open ON blocker (run_id, kind) WHERE cleared_at IS NULL;
 
 Партиальный индекс по открытым блокировкам — это и есть быстрый ответ на «что
 сейчас ждёт человека» (`decision.md` §5, требование индексов с первого дня).
+
+### 6.3. Append-only журнал событий
 
 ```sql
 CREATE TABLE run_event (
@@ -1345,6 +1351,8 @@ BEGIN
   SELECT RAISE(ABORT, 'run_event is append-only');
 END;
 ```
+
+### 6.4. Общий монотонный порядок событий
 
 `run_event.id` служит **общим монотонным порядком** для всей системы — на нём
 стоит вычисление периода открытости. Это единственная причина, по которой
