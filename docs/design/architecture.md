@@ -1,8 +1,8 @@
 # Архитектура
 
 Дата: 2026-08-04. Статус: после дополнительного ревью T1.5 исправлена
-достижимость `cap_exhausted_new`; один защищённый вопрос Q44 в контракте
-findings открыт. Production-реализацией не проверена.
+достижимость `cap_exhausted_new`, защищённый вопрос Q44 закрыт явным решением
+владельца. Production-реализацией не проверена.
 
 Верхнеуровневая архитектура системы целиком: границы, компоненты, процессы,
 потоки управления, машины состояний, обработка отказов. Что и почему решено —
@@ -532,7 +532,8 @@ stateDiagram-v2
   closed_reviewer --> open: reopening
   closed_policy --> open: reopening
   closed_human --> open: reopening → всегда обратно к человеку
-  closed_reviewer --> closed_reviewer: reaffirmation, круга не порождает
+  closed_reviewer --> closed_reviewer: reaffirmation только после accepted_reason
+  closed_human --> closed_human: человек выбрал keep_closed
 ```
 
 Период накопления severity живёт **не по этой диаграмме**, а по своей: его

@@ -1,8 +1,9 @@
 # Контракты агентов
 
 Дата: 2026-08-04. Статус: после дополнительного ревью исправлен недостижимый
-`cap_exhausted_new`; один защищённый выбор Q44 по `reaffirmed_closed` открыт.
-Остальные контракты содержательно закрыты; реальным рантаймом не проверены.
+`cap_exhausted_new`, а владелец закрыл защищённый выбор Q44 строгой границей
+`reaffirmed_closed`. Контракты содержательно закрыты; реальным рантаймом не
+проверены.
 
 Что рантайм даёт агенту на вход и что обязан получить на выходе. Всё, что не
 проходит валидацию здесь, — `contract_error`: попытка не состоялась, счётчики
@@ -121,7 +122,7 @@ finding, тот же период, назад по времени) на уров
 (`decision.md` §7.4).
 
 ```
-CLOSED FINDINGS (may be reaffirmed or reopened, never reported as new)
+CLOSED FINDINGS (same issue: reaffirm or reopen; different/uncertain issue: new)
   F-04  high   accepted_reason  reviewer  Retry budget shared across vendors
   F-07  medium verified_fixed   reviewer  Off-by-one in cap check
   F-09  high   human_decision   human     Ship without worktree isolation
@@ -130,6 +131,11 @@ CLOSED FINDINGS (may be reaffirmed or reopened, never reported as new)
 Колонка authority показывается не для красоты: переоткрытие `human`-закрытия
 всегда возвращается человеку независимо от severity, и агент должен понимать,
 что предлагает.
+
+`new` не переименовывает известный закрытый finding: он означает, что новое
+observation описывает другую проблему либо reconciler не может безопасно
+отождествить их. Если связь установлена, применяются только
+`reaffirmed_closed`/`reopen_closed` и строгая проверка §4.
 
 ### 2.3. Чего в промпте нет никогда
 
@@ -229,15 +235,16 @@ CLOSED FINDINGS (may be reaffirmed or reopened, never reported as new)
 | 2 | Ни одно не упомянуто дважды | Пересечение групп — `contract_error` |
 | 3 | `outcome` из четырёх допустимых | `contract_error` |
 | 4 | `existing_open` ссылается на **открытый** ID допустимого scope | `contract_error` |
-| 5 | `reaffirmed_closed` и `reopen_closed` — только на **закрытый** ID | `contract_error` |
+| 5 | `reaffirmed_closed` — только на **закрытый** ID с `last_resolution = accepted_reason`; `reopen_closed` — на любой **закрытый** ID допустимого scope | `contract_error` |
 | 6 | `reopen_closed` несёт непустой `reason` | `contract_error` |
 | 7 | `new` не несёт `finding_id`; остальные несут | `contract_error` |
 
-Проверка 5 содержит открытый защищённый вопрос Q44. Здесь записан широкий
-вариант «любой closed ID», тогда как `decision.md` §7.2 разрешает
-`reaffirmed_closed` только после `accepted_reason`. До ответа владельца строка
-не является принятым контрактом; T1.5 сохраняет её лишь как явно помеченную
-предварительную границу.
+Проверка 5 — явное решение владельца Q44. Если это другая проблема либо связь с
+прежним ID неуверенная, reconciler выбирает `new`. Если это тот же finding,
+после `verified_fixed`, `policy_closed` и `human_decision` допустим только
+`reopen_closed`; human-закрытие затем проходит двухшаговый гейт §4.2. Ответ
+человека `keep_closed`, который создаёт `reaffirmation`, не является тихим
+исходом агента `reaffirmed_closed`.
 
 Проверки 1 и 2 вместе означают **исчерпывающее разбиение**: наблюдение нельзя
 потерять и нельзя положить в две группы. Это инвариант 2, и он проверяется
@@ -637,8 +644,9 @@ severity вне enum · `unchanged_from` в слепой фазе · `unchanged_
 лимит числа наблюдений.
 
 **Reconciliation:** наблюдение не упомянуто · упомянуто дважды · `outcome` вне
-четырёх · `existing_open` на закрытый ID · `reaffirmed_closed`/`reopen_closed` на
-открытый · `reopen_closed` без `reason` · `new` с `finding_id` · ссылка на ID вне
+четырёх · `existing_open` на закрытый ID · `reaffirmed_closed` на открытый либо
+закрытый не через `accepted_reason` · `reopen_closed` на открытый ·
+`reopen_closed` без `reason` · `new` с `finding_id` · ссылка на ID вне
 допустимого scope.
 
 **Dispositions:** не покрыт открытый ID · ID вне списка · повтор · отказ без
