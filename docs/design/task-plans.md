@@ -328,17 +328,21 @@ T1.7 подтвердил допустимую пару: follow-up есть ли
 
 ### T1.7 · Контракты и валидатор · 2 д
 
-Разбор маркеров, Pydantic-схемы восьми ответов, включая обязательный массив
-`new_observations` в `review.decisions.v1`, формирование сообщения об ошибке для
-повторной попытки.
+Разбор маркеров и строгого JSON до `1 MiB`, Pydantic-схемы восьми ответов,
+immutable validation contexts, включая обязательный массив `new_observations`
+в `review.decisions.v1`, и формирование сообщения об ошибке для повторной
+попытки. Это первая runtime-зависимость от Pydantic; `pyproject.toml` и
+`uv.lock` меняются вместе.
 
 **Готово, когда:** каждая строка чек-листа `agent-contracts.md` §11 имеет тест с
-битым входом; отдельно проверено, что новый observation fix-check не принимает
-`finding_id`/`unchanged_from`, а пустой массив остаётся валидным. Follow-up
-observation внутри `decisions[*]` сохраняет внешний target и не попадает в
-адаптер T1.5; он допустим при `still_present`/`insists` и даёт
+битым синтетическим marked output; отдельно проверено, что новый observation
+fix-check не принимает `finding_id`/`unchanged_from`, а пустой массив остаётся
+валидным. Follow-up observation внутри `decisions[*]` сохраняет внешний target
+и не попадает в адаптер T1.5; он допустим при `still_present`/`insists` и даёт
 `contract_error` при `verified_fixed`/`accepted_reason`; `new_observations` не
-могут использовать этот direct path.
+могут использовать этот direct path. T1.7 не читает checkout/store сам:
+существующие пути, scoped IDs, policy и reachable SHA приходят immutable
+snapshot-контекстом, а владельцы домена повторно держат несущие инварианты.
 
 ### T1.7b · Вертикальный срез домена на реальной базе · 2 д
 

@@ -149,7 +149,9 @@ src/
       profiles.py        профиль как данные: argv, env-маппинг, secret_ref
       adapters/          claude.py, codex.py, cursor.py
       runner.py          create_subprocess_exec, process group, kill
-      parse.py           разбор структурированного вывода
+      parse.py           маркеры, строгий JSON и выбор версии схемы
+      contract_models.py восемь Pydantic-моделей ответов агентов
+      validation.py      context-проверки и feedback для повторной попытки
       redaction.py       замена секретов до записи
     effects/
       git_service.py     разрешённые операции; запрещённых просто нет
