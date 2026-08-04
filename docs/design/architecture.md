@@ -2,7 +2,8 @@
 
 Дата: 2026-08-04. Статус: после дополнительного ревью T1.5 исправлена
 достижимость `cap_exhausted_new`, защищённый вопрос Q44 закрыт явным решением
-владельца. Production-реализацией не проверена.
+владельца, для follow-up observations выбран вариант B в Q45.
+Production-реализацией не проверена.
 
 Верхнеуровневая архитектура системы целиком: границы, компоненты, процессы,
 потоки управления, машины состояний, обработка отказов. Что и почему решено —
@@ -316,7 +317,9 @@ flowchart TB
    прерванной авторской попытки, проверить artifact repo по digest,
    дослать неотправленное из outbox.
 2. Проверить полноту: наблюдения без связи, круги с решениями, но без
-   результата, findings без finding_round в открытом круге.
+   результата, findings без finding_round в открытом круге. Непривязанные
+   observations в открытом круге означают незавершённый reconciliation, который
+   надо продолжить; в круге с уже записанным result это нарушение инварианта.
 3. Проверить граф: циклы, ложный успех (запрос db-schema §9).
 4. Ветки, которые были running → blocked(awaiting_continue).
 ```
@@ -435,14 +438,18 @@ stateDiagram-v2
 
 Перед `decide_after_check` текущий `fix_check` обязан завершить ещё один шов.
 Каждый владелец finding'а возвращает решения по выданным ему ID и может
-добавить `new_observations`, найденные при проверке правки. Если они есть, T1.5
-проводит reconciliation на этом же `review_round` и на **post-decision
-ledger**: все валидные `verified_fixed`/`accepted_reason` этого check уже
-отражены в status. Поэтому finding, только что закрытый решением,
+добавить два разных вида evidence. Follow-up observation внутри решения уже
+имеет target во внешнем `finding_id`: T1.6 проверяет `unchanged_from` на тот же
+finding и период, а T1.7b пишет observation и `recurrence` одной транзакцией с
+решением. Только `new_observations` без известной личности идут в T1.5. Если они
+есть, T1.5 проводит reconciliation на этом же `review_round` и на
+**post-decision ledger**: все валидные `verified_fixed`/`accepted_reason` этого
+check уже отражены в status. Поэтому finding, только что закрытый решением,
 нельзя сослать как `existing_open`; reconciler обязан выбрать closed outcome.
 T1.5 выдаёт новым группам личности, связывает повторы и добавляет открытые
-findings в facts текущей проверки. Только после этого T1.6 вычисляет
-status/severity, а T1.4 принимает решение. Поэтому finding с
+findings в facts текущей проверки. После обоих путей полный запрос observations
+без link обязан быть пуст, только затем T1.6 вычисляет итоговый status/severity,
+а T1.4 принимает решение. Поэтому finding с
 `first_round_id == current_round_id` достижим и даёт `cap_exhausted_new` при
 исчерпанном cap. Campaign при этом остаётся в `fix_cycle`: `reconciliation`
 здесь — подшаг круга, а не состояние кампании.
@@ -622,12 +629,15 @@ stateDiagram-v2
      ├─ TX: finding_round.disposition (все или ни одного)
      │       + author_revision + attempt.outcome
      ├─ владельцу каждого finding'а: проверить исправление или отказ;
-     │  ответ может содержать new_observations
-     ├─ TX: finding_round.reviewer_decision + resolutions
-     │       + новые immutable observations
+     │  ответ может содержать follow-up observation известного ID
+     │  и отдельные new_observations
+     ├─ TX: finding_round.reviewer_decision
+     │       + follow-up observation + recurrence после проверки T1.6
+     │       + resolutions + unclassified new_observations
      ├─ если new_observations не пусты:
      │    reconciliation T1.5 на текущем fix_check
      │    → новые finding/links/finding_round
+     ├─ assert: observations текущего round без link отсутствуют
      ├─ собрать open set после всех решений и reconciliation
      ├─ TX: review_round.result + событие
      └─ decide_after_check(...) → следующий круг | успех | человек

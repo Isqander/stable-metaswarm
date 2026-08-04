@@ -715,11 +715,13 @@ END;
 
 Триггер закрывает «назад по времени», «в пределах кампании» и корректность
 наследования. Два оставшихся условия — «того же finding'а» и «того же периода
-открытости» — на момент вставки наблюдения **проверить невозможно**: наблюдение
-существует раньше личности, и привязка к finding'у появляется только на
-reconciliation. Поэтому они проверяются кодом на этапе reconciliation, до записи
-связей, и нарушение даёт `contract_error` с отклонением всего вывода ревьюера.
-Это не ослабление: раньше момента reconciliation данных для проверки просто нет.
+открытости» — возникают только у follow-up observation внутри
+`review.decisions.v1.decisions[*]`: у blind discovery и `new_observations`
+`unchanged_from` запрещён, там обязательна собственная `severity_suggested`.
+Target follow-up observation уже задан внешним `finding_id`, поэтому T1.6
+проверяет finding и период до вставки, а T1.7b пишет observation и
+`recurrence` в одной транзакции с решением. Нарушение даёт `contract_error` и
+не оставляет observation без link. Это выбор B в Q45.
 
 **Где `unchanged_from` вообще возможен.** В фазе `blind_discovery` ревьюер не
 видит ledger и не знает ID прежних наблюдений — сослаться ему не на что, и любое
@@ -787,26 +789,32 @@ END;
 получена констрейнтом.
 
 **Вторая половина — «наблюдение не потеряно» — констрейнтом не выражается**, это
-утверждение о полноте, а не об отдельной строке. Оно проверяется кодом при
-закрытии reconciliation:
+утверждение о полноте, а не об отдельной строке. Полный гейт выполняется кодом
+непосредственно перед записью `review_round.result`, после механических links
+из решений и всех необходимых reconciliation:
 
 ```sql
--- Должен вернуть 0 строк, иначе вывод reconciliation отклоняется целиком.
+-- Должен вернуть 0 строк перед закрытием review_round.
 SELECT o.id, o.public_id
   FROM review_observation o
   LEFT JOIN finding_observation_link l ON l.observation_id = o.id
  WHERE o.round_id = :round_id AND l.observation_id IS NULL;
 ```
 
-Тот же запрос гоняется в recovery audit — на случай падения между записью части
-связей и коммитом. Это дешевле любой схемы и надёжнее.
+Тот же запрос гоняется в recovery audit, но результат зависит от состояния
+круга. В открытом круге строки без link — законное незавершённое
+reconciliation: recovery возобновляет его. Если `review_round.result` уже
+записан, хотя запрос непуст, это нарушение инварианта. Запрос намеренно не
+сужается до входа T1.5: он страхует оба пути и остаётся глобальным гейтом круга.
 
-**Четыре типа связи, по одному на каждый исход reconciliation:**
+**Четыре типа связи.** Четыре исхода reconciliation отображаются в них
+биективно; direct follow-up path Q45 использует тот же `recurrence`, потому что
+target уже известен:
 
-| Исход reconciliation | `link_type` | Что делает с кругом |
+| Классификация / источник | `link_type` | Что делает с кругом |
 |---|---|---|
 | `new` | `first_seen` | Входит в текущий круг, создаётся новый ID |
-| `existing_open(id)` | `recurrence` | Входит в текущий круг |
+| `existing_open(id)` либо follow-up observation решения по известному ID | `recurrence` | Входит в текущий круг; во втором случае target задаёт внешний `finding_id` без reconciliation |
 | `reaffirmed_closed(id)` | `reaffirmation` | Круга не порождает; допустим только после `accepted_reason` |
 | `reopen_closed(id, reason)` | `reopening` | Переводит закрытое в текущий круг |
 
@@ -1630,13 +1638,13 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | # | Инвариант | Держит | Чем |
 |---|---|---|---|
 | 1 | Каждое открытое замечание закрыто явным статусом | **Код** | Проверка покрытия открытых ID до записи dispositions; круг не закрывается частично |
-| 2 | Наблюдение классифицировано ровно одним исходом | **База + код** | `finding_observation_link.observation_id` PK — не даст двух связей; полнота — запрос-проверка при закрытии reconciliation |
+| 2 | Каждое наблюдение получает ровно одну связь: через reconciliation либо детерминированную `recurrence` известного target | **База + код** | `finding_observation_link.observation_id` PK — не даст двух связей; полнота — глобальный запрос перед `review_round.result` |
 | 3 | `existing_open` — только открытый ID; `reaffirmed_closed` — только закрытый через `accepted_reason`; `reopen_closed` — любой закрытый ID | **Код** | Валидация на приёме по `finding_status`: status и `last_resolution` проверяются до записи |
 | 4 | Счётчиков два, независимы; настраивается только `max_author_revisions` | **База** | `campaign_counters` — представление; хранимых счётчиков нет, второй ручки нет |
 | 5 | Оба растут только после `succeeded` | **База + код** | `author_revision` — составные FK `(attempt_id, role)` и `(attempt_id, outcome)`; `review_check_count` считает `review_round.result`, который база с попыткой связать не может — см. ниже |
 | 6 | Кап проверяется в момент решения «продолжать ли» | **Код** | Единственная точка принятия решения в `review.transition`; проверка `review_check_count <= max_author_revisions + 1` — assert, а не гейт |
 | 7 | Личность выдаётся один раз | **База** | `finding.public_id` UNIQUE в прогоне; `first_observation_id` UNIQUE; пересчёта нет в коде |
-| 8 | Каждое наблюдение несёт `severity_suggested` либо `unchanged_from`; severity в enum; ссылка назад, без циклов | **База + код** | `CHECK ((a IS NULL) <> (b IS NULL))`, FK на `severity_scale`, триггер обратной ссылки и равенства унаследованной severity; «тот же finding и период» — код на reconciliation |
+| 8 | Каждое наблюдение несёт `severity_suggested` либо `unchanged_from`; severity в enum; ссылка назад, без циклов | **База + код** | `CHECK ((a IS NULL) <> (b IS NULL))`, FK на `severity_scale`, триггер обратной ссылки и равенства унаследованной severity; «тот же finding и период» — T1.6 до direct link либо после reconciliation |
 | 9 | `escalation_severity` монотонна вверх | **База** | Вычисляется `MAX(rank)` по периоду; понизить нечего |
 | 10 | Исход ревьюера совместим с disposition | **База** | CHECK в `finding_round` — **с явной проверкой `disposition IS NOT NULL`**, иначе NULL проходит |
 | 11 | Решение выносит владелец круга, оно единственное | **База + код** | Одна колонка `reviewer_decision`; принадлежность попытки владельцу — код |
@@ -1676,7 +1684,7 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 3, 26, 28 и 29 — обычные утверждения об отдельных фактах. Точнее так: **за кодом
 остаются три класса** —
 
-1. **полнота множества** — «каждое наблюдение классифицировано», «каждый
+1. **полнота множества** — «каждое наблюдение получило одну связь», «каждый
    открытый ID покрыт» (1, 2, 24);
 2. **порядок и атомарность** — «событие в той же транзакции», «ответ до снятия
    блокировки», «новая попытка после подтверждения смерти группы» (6, 14–17, 25);
@@ -1702,6 +1710,14 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | Круг ревью закрыт | Все `finding_round` круга + `review_round.result` + `finding_resolution` по закрытым + состояние кампании (`closed_clean` при успехе; прежний `fix_cycle` при `escalated` до ответа человека) + `run_event` |
 | Импорт графа | `task_graph_import` + `task` + `task_dependency` + инвалидация задач прежней ревизии + `run_event` |
 | Эскалация | `review_round.result='escalated'` + `human_question(snapshot_json)` + `notification_outbox` + `blocker` + сохранённый `review_campaign.state='fix_cycle'` + `run_event` |
+
+Отдельная атомарная операция внутри открытого `fix_check` не добавляет нового
+перехода машины состояний, но тоже неделима: follow-up `review_observation`
+из `decisions[*]` + direct link `recurrence` + `finding_round.reviewer_decision`
+и соответствующее resolution/human-следствие + `run_event`. Невалидный
+`unchanged_from` откатывает всю операцию. `new_observations` могут остаться
+непривязанными только пока отдельный reconciliation ещё не завершён; записать
+`review_round.result` в таком состоянии запрещает глобальный гейт §5.4.
 
 Обратите внимание на второй: **на место снятой блокировки `human_question`
 ставится `awaiting_continue`** — в той же транзакции. Иначе между снятием одной
@@ -1812,7 +1828,7 @@ INSERT INTO verification_status(status) VALUES ('green'),('red'),('error');
 
 ## 14. Уточнения к `decision.md`
 
-Проектирование и последующее ревью таск-планов обнаружили двенадцать мест, где
+Проектирование и последующее ревью таск-планов обнаружили тринадцать мест, где
 решение чего-то не учло, и одну возможность (пункт 5). Ни одно из принятых
 решений не отменяется — но без этих уточнений часть из них нереализуема.
 
@@ -1855,7 +1871,7 @@ immutable-записей и пересчёт всегда даст тот же �
 порога эскалации становится индексированным `MAX(rank)` вместо рекурсивного CTE
 на каждом чтении.
 
-Пункты 1–4 и 6–12 **перенесены в `decision.md`** и живут там как принятые
+Пункты 1–4 и 6–13 **перенесены в `decision.md`** и живут там как принятые
 решения, а не как уточнения второго слоя: все они меняют семантику, а не форму.
 Здесь они остаются с обоснованием, почему потребовались.
 
@@ -1937,6 +1953,23 @@ immutable-записей и пересчёт всегда даст тот же �
 `reaffirmation`, но это явное подтверждение человека, а не тихий исход агента.
 Схему менять не потребовалось: `finding_status.last_resolution` и
 `last_authority` уже дают валидатору оба факта.
+
+**13. Follow-up observation известного finding связывает рантайм, а не
+reconciler.** После добавления `new_observations` первая редакция оставила две
+несовместимые формулировки: T1.5 получал только новые observations без target,
+но любая связь якобы могла появиться только на reconciliation. Поэтому
+observation внутри `decisions[*]` с внешним `finding_id` и законным
+`unchanged_from` мог остаться без link и заблокировать закрытие круга.
+
+В Q45 владелец выбрал вариант B. Внешний `finding_id` уже является
+детерминированным target: T1.6 проверяет, что `unchanged_from` относится к тому
+же finding и текущему периоду, после чего T1.7b атомарно пишет observation,
+`finding_observation_link(link_type='recurrence')` и решение. Только blind
+discovery и `new_observations` с неизвестной личностью проходят T1.5. Полный
+запрос observations без link остаётся глобальным гейтом перед
+`review_round.result`; в открытом круге recovery трактует такие строки как
+незавершённый reconciliation, а не как готовый повреждённый результат. DDL
+менять не потребовалось: link уже хранит target, тип, attempt и event.
 
 ### Что было неверно в первой редакции этого документа
 
