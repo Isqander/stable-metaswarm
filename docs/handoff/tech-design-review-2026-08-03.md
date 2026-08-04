@@ -82,7 +82,7 @@ SQLite `CHECK`, возможность назначить автора ревь�
 | [`decision.md`](../metaResearches/decision.md) | Источник решений: границы v1, модель данных, findings, роли, флоу, инварианты и приёмочные сценарии |
 | [`design/README.md`](../design/README.md) | Навигация, статус и краткая история найденных ошибок |
 | [`architecture.md`](../design/architecture.md) | Границы компонентов, process model, state machines, recovery, effects, безопасность и тестирование |
-| [`db-schema.md`](../design/db-schema.md) | Полный DDL, представления, транзакционные срезы, разметка 29 инвариантов; обязательно §14 с уточнениями к решению |
+| [`db-schema.md`](../design/db-schema.md) | Полный DDL, представления, транзакционные срезы, разметка 30 инвариантов; обязательно §14 с уточнениями к решению |
 | [`agent-contracts.md`](../design/agent-contracts.md) | Восемь agent-produced схем, отдельный service-produced `verification.result.v1`, выдача ID и полный чек-лист валидации |
 | [`vendor-cli-contracts.md`](../design/vendor-cli-contracts.md) | Проверенные argv, parsing/completion, модели, resume, read-only, SIGTERM и ограничения M0 |
 | [`task-plans.md`](../design/task-plans.md) | Граф, критерии готовности, зависимости, пакеты P1-A–P1-E и оценки |
@@ -113,7 +113,7 @@ SQLite `CHECK`, возможность назначить автора ревь�
 Проверить прежде всего:
 
 1. нет ли противоречий между `decision.md`, архитектурой, DDL и agent contracts;
-2. каждый ли из 29 инвариантов действительно удерживается указанным слоем и
+2. каждый ли из 30 инвариантов действительно удерживается указанным слоем и
    атомарной транзакцией;
 3. не теряется ли finding и не сбрасывается ли severity при reopen,
    `accepted_reason`, human override и переходе между кампаниями;
