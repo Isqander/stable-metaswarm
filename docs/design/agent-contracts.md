@@ -40,8 +40,9 @@ JSON — тогда «найти json-блок в ответе» станови�
 - всё вне маркеров игнорируется: рассуждения модели до и после — это норма, а не
   нарушение;
 - содержимое между маркерами обязано быть одним JSON-object не больше
-  `1 MiB` в UTF-8; массив/scalar на верхнем уровне, duplicate keys, `NaN` и
-  `Infinity` — `contract_error`;
+  `1 MiB` в UTF-8; массив/scalar на верхнем уровне, duplicate keys и любое
+  non-finite число — как явные `NaN`/`Infinity`, так и переполнение обычного
+  литерала `1e999` — `contract_error`;
 - финальный вывод извлекается адаптером (`extract_result()`), а не чтением
   сырого stdout: у каждого вендора свой stream-json.
 
@@ -242,7 +243,7 @@ ledger. Follow-up observation внутри `decisions[*]` сюда не вход
 }
 ```
 
-Валидация — семь проверок, все до записи:
+Валидация — восемь проверок, все до записи:
 
 | # | Проверка | Нарушение |
 |---|---|---|
@@ -253,6 +254,11 @@ ledger. Follow-up observation внутри `decisions[*]` сюда не вход
 | 5 | `reaffirmed_closed` — только на **закрытый** ID с `last_resolution = accepted_reason`; `reopen_closed` — на любой **закрытый** ID допустимого scope | `contract_error` |
 | 6 | `reopen_closed` несёт непустой `reason` | `contract_error` |
 | 7 | `new` не несёт `finding_id`; остальные несут | `contract_error` |
+| 8 | `new` несёт непустой `title`; остальные три исхода `title` не несут | `contract_error` |
+
+Проверка 8 не даёт двум ошибкам уйти ниже по потоку. Без title новая identity
+падает только на `finding.title NOT NULL` при записи; title на существующем ID
+становится тихим обходом правила, что ground truth меняет только человек.
 
 Проверка 5 — явное решение владельца Q44. Если это другая проблема либо связь с
 прежним ID неуверенная, reconciler выбирает `new`. Если это тот же finding,
@@ -541,6 +547,9 @@ Campaign/order/effective severity защищает база; принадлеж�
 `steps` обязан содержать хотя бы один шаг, а `rationale` — непустое объяснение
 выбора. Пустой план не означает «проверять нечего»: он создаёт ложный зелёный
 результат и потому отклоняется как `contract_error` до policy check.
+`expect` в `verification.plan.v1` имеет ровно одно значение — `exit_zero`.
+Добавление `exit_nonzero`, проверки текста или другой семантики потребует новой
+версии схемы и синхронного изменения валидатора T1.7 и исполнителя T1.14.
 
 Дальше план не исполняется агентом. Его исполняет детерминированный сервис,
 проверив каждый шаг (`architecture.md` §10). Это единственное место во всей
@@ -721,9 +730,9 @@ blocker'е `human_question`. Поэтому вариант «ещё одна п�
 не тратят `contract_retry_budget` и порождают вопрос человеку по §7.
 
 **Транспорт:** маркеры не ровно по разу или стоят в неверном порядке ·
-содержимое не один строгий JSON-object · duplicate key/`NaN`/`Infinity` ·
-неизвестная или неожиданная `schema` · неизвестное поле/неверный тип · превышен
-лимит `1 MiB`.
+содержимое не один строгий JSON-object · duplicate key/non-finite число,
+включая `1e999` · неизвестная или неожиданная `schema` · неизвестное
+поле/неверный тип · превышен лимит `1 MiB`.
 
 **Наблюдения:** нет ни `severity_suggested`, ни `unchanged_from` · есть оба ·
 severity вне enum · `unchanged_from` в слепой фазе · `unchanged_from` не на
@@ -735,7 +744,7 @@ severity вне enum · `unchanged_from` в слепой фазе · `unchanged_
 четырёх · `existing_open` на закрытый ID · `reaffirmed_closed` на открытый либо
 закрытый не через `accepted_reason` · `reopen_closed` на открытый ·
 `reopen_closed` без `reason` · `new` с `finding_id` · ссылка на ID вне
-допустимого scope.
+допустимого scope · `new` без непустого `title` · существующий ID с `title`.
 
 **Dispositions:** не покрыт открытый ID · ID вне списка · повтор · отказ без
 обоснования · значение вне трёх.
@@ -748,10 +757,10 @@ severity вне enum · `unchanged_from` в слепой фазе · `unchanged_
 follow-up observation с `unchanged_from` другого finding или периода.
 
 **План верификации:** пустой `steps`/`rationale` · `argv` строкой или пуст ·
-неизвестный `expect` · неположительный `step_timeout_s` — `contract_error`;
-shell-синтаксис · `cwd` вне разрешённого · исполняемое вне allowlist · путь из
-denylist · адрес production-среды — `VerificationPolicyRejection` и вопрос
-человеку, а не retry.
+`expect` не равен `exit_zero` · неположительный `step_timeout_s` —
+`contract_error`; shell-синтаксис · `cwd` вне разрешённого · исполняемое вне
+allowlist · путь из denylist · адрес production-среды —
+`VerificationPolicyRejection` и вопрос человеку, а не retry.
 
 **Граф:** дубль ID · висячее ребро · self-edge · цикл · дубль ребра.
 
