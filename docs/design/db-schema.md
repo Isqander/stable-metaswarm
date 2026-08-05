@@ -676,6 +676,11 @@ BEGIN
 END;
 ```
 
+`seq` выделяет `FindingRepository` как следующий номер внутри campaign в той
+же writer-транзакции, а `public_id` сразу получает окончательную форму
+`O-<campaign_id>-<seq>`. `UNIQUE(campaign_id, seq)` и единственный writer
+делают пару однозначной; временного observation ID нет.
+
 Три вещи здесь неочевидны.
 
 **`severity_effective` — разрешённая денормализация, и это не противоречит
@@ -1563,6 +1568,11 @@ CREATE TABLE human_answer (
 );
 ```
 
+`QuestionRepository` выделяет `human_question.id` и `public_id = Q-<id>` тем же
+приёмом, что finding: явный следующий AUTOINCREMENT ID внутри active
+transaction и один INSERT окончательной строки. Rollback не оставляет ни
+вопроса, ни имени.
+
 `reason` — не украшение. Он отвечает на требование `decision.md` §7.1: причина
 остановки живёт в состоянии, а не выводится из счётчика, и `cap_exhausted_same`
 против `cap_exhausted_new` — это два разных вопроса человеку с разными
@@ -2187,18 +2197,19 @@ author/reviewer у `post_check` пустыми; строгий гейт пров
 останавливает соседние ветки: при наличии любой активной Run остаётся
 `running`, иначе вычисляется `waiting_human`.
 
-**20. Короткий finding ID выделяется вместе с внутренним ID.** Схема требовала
-публичную форму `F-17`, а T1.5 намеренно возвращает identity intent без ID, но
-граница allocator до T1.7b не была определена. Два естественных обхода плохи:
+**20. Короткие review-core ID выделяются вместе с их монотонными
+компонентами.** Схема требовала формы `F-17`, `O-4-12` и `Q-3`, а T1.5
+намеренно возвращает identity intent без ID, но граница allocator до T1.7b не
+была определена. Два естественных обхода плохи:
 ID из текста превращает identity в content hash, а INSERT временного
 `public_id` с последующим commit делает промежуточное имя наблюдаемым.
 
-T1.7b использует свойство единственного writer: repository внутри
-`BEGIN IMMEDIATE` берёт следующий AUTOINCREMENT номер `finding`, одним INSERT
-записывает `id=N` и `public_id=F-N` и возвращает обе величины. Rollback не
-публикует и не расходует identity; committed/удалённый номер не переиспользуется
-благодаря AUTOINCREMENT. Это локальная persistence-механика, а не новый способ
-сопоставлять findings.
+T1.7b использует свойство единственного writer. Для finding/question repository
+внутри `BEGIN IMMEDIATE` берёт следующий AUTOINCREMENT номер, одним INSERT
+записывает `id=N` и `public_id=F-N`/`Q-N`. Observation получает следующий
+`seq` кампании и сразу `O-<campaign_id>-<seq>`. Rollback ничего не публикует;
+committed/удалённый INTEGER ID не переиспользуется благодаря AUTOINCREMENT.
+Это локальная persistence-механика, а не новый способ сопоставлять findings.
 
 ### Что было неверно в первой редакции этого документа
 

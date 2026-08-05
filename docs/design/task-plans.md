@@ -361,9 +361,9 @@ reconciliation → severity и кап → вопрос человеку `cap_exh
 finding имеет `first_round_id` последнего `fix_check`, причина вопроса равна
 `cap_exhausted_new`, а все значения (`escalation_severity`, счётчики, статус
 finding'а) читаются из базы через те же представления, что будет читать рантайм.
-Пара internal/public ID выделена атомарно и имеет форму `N`/`F-N`; rollback не
-оставляет identity, а следующий committed allocator не переиспользует ранее
-опубликованный номер.
+Публичные IDs выделены атомарно в формах `F-N`, `O-<campaign>-<seq>` и `Q-N`;
+rollback не оставляет identity, а committed allocator не переиспользует ранее
+опубликованный INTEGER ID.
 Строки `issued` проходят строгий гейт author revision/owner decision, новый
 finding получает `post_check` без фиктивных ответов и не блокирует закрытие
 текущего круга. Human gate одной транзакцией создаёт branch-scoped blocker и
