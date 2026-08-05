@@ -1,6 +1,6 @@
 # Схема состояния: SQLite
 
-Дата: 2026-08-05. Статус: пятая редакция после внешнего ревью. Связная DDL из
+Дата: 2026-08-05. Статус: шестая редакция после ревью T1.7b. Связная DDL из
 документа исполнена целиком в SQLite in-memory: 61 таблица, 24 индекса,
 6 представлений и 6 триггеров; `PRAGMA foreign_key_check` чист. Отдельными
 негативными вставками проверены enum-FK, policy verdict и производные состояния
@@ -27,7 +27,7 @@ DDL. Документ отвечает на вопрос, на который р
 | Порядок работ | `task-plans.md` |
 
 В конце — §14: список мест, где проектирование **уточнило или дополнило**
-решение. Читать обязательно: там двадцать уточнений с обоснованием, включая одну
+решение. Читать обязательно: там двадцать два уточнения с обоснованием, включая одну
 необязательную возможность.
 
 ---
@@ -631,6 +631,41 @@ author/reviewer пусты по CHECK ниже; в следующем `fix_check
 молча обходил проверку. Для primary discovery строки, созданные reconciliation,
 также имеют `post_check`: до первой авторской правки иных строк быть не может.
 
+Строгий запрос выше не обнаружит finding, для которого строку текущего круга
+вообще забыли создать. Поэтому перед **любым** `review_round.result` выполняется
+отдельный гейт покрытия roster. Finding считается вошедшим в кампанию, если на
+него уже есть link от observation этой кампании; каждый такой открытый finding
+обязан иметь в текущем круге ровно одну строку `issued` либо `post_check`:
+
+```sql
+-- Должен вернуть 0 строк перед закрытием review_round.
+SELECT fs.finding_id
+  FROM finding_status fs
+ WHERE fs.status = 'open'
+   AND EXISTS (
+         SELECT 1
+           FROM finding_observation_link l
+           JOIN review_observation o ON o.id = l.observation_id
+          WHERE l.finding_id = fs.finding_id
+            AND o.campaign_id = :campaign_id
+       )
+   AND NOT EXISTS (
+         SELECT 1
+           FROM finding_round fr
+          WHERE fr.campaign_id = :campaign_id
+            AND fr.round_no = :round_no
+            AND fr.finding_id = fs.finding_id
+       );
+```
+
+При создании `fix_check` exact open set и все его `issued`-строки пишутся одной
+транзакцией. Позднее reconciliation может законно добавить `post_check`, поэтому
+гейт закрытия проверяет наличие строки участия, а её форму и полноту ответа —
+отдельный strict-issued запрос. В discovery тот же гейт ловит link без
+`post_check`. Оба запроса принадлежат T1.3 repositories и повторяются recovery
+audit; рассуждение «mapper должен был создать строку» не заменяет проверку
+полноты множества.
+
 Что база всё же гарантирует: `review_round.result` и `closed_at` выставляются
 только вместе (`CHECK`), так что «закрытый круг без результата» невозможен.
 
@@ -801,8 +836,9 @@ CREATE TABLE finding (
 вычисления периода открытости, см. §5.6.
 
 **Выдача пары internal/public ID.** `FindingRepository` внутри уже открытого
-`BEGIN IMMEDIATE` читает следующий номер AUTOINCREMENT из `sqlite_sequence`
-для `finding` и одним INSERT задаёт явный `id = N`, `public_id = 'F-' || N`.
+`BEGIN IMMEDIATE` вычисляет следующий номер AUTOINCREMENT как
+`COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'finding'), 0) + 1` и
+одним INSERT задаёт явный `id = N`, `public_id = 'F-' || N`.
 Явная вставка максимального INTEGER PRIMARY KEY обновляет sequence самой
 SQLite. Единственный writer исключает гонку между чтением и INSERT; rollback
 откатывает и строку, и sequence, а удаление уже committed finding не позволяет
@@ -1767,7 +1803,7 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 
 | # | Инвариант | Держит | Чем |
 |---|---|---|---|
-| 1 | Каждый `issued` finding получил disposition автора и решение владельца; `post_check` переносит работу в следующий круг | **База + код** | `entry_kind` — enum FK и CHECK формы строки; полный запрос §5.2 связывает `issued` с `preceding_revision_id`, успешными author/reviewer attempts и owner; `post_check` из гейта исключён явно |
+| 1 | Каждый открытый finding кампании представлен в текущем круге; каждый `issued` получил disposition автора и решение владельца; `post_check` переносит работу в следующий круг | **База + код** | `entry_kind` — enum FK и CHECK формы строки; roster-запрос §5.2 ловит отсутствующую строку участия, strict-issued запрос связывает `issued` с `preceding_revision_id`, успешными author/reviewer attempts и owner; `post_check` исключён только из второго гейта |
 | 2 | Каждое наблюдение получает ровно одну связь: через reconciliation либо детерминированную `recurrence` известного target только при `still_present`/`insists` | **База + код** | `finding_observation_link.observation_id` PK — не даст двух связей; допустимость решения и полнота — код до транзакции и глобальный запрос перед `review_round.result` |
 | 3 | `existing_open` — только открытый ID; `reaffirmed_closed` — только закрытый через `accepted_reason`; `reopen_closed` — любой закрытый ID | **Код** | Валидация на приёме по `finding_status`: status и `last_resolution` проверяются до записи |
 | 4 | Счётчиков два, независимы; настраивается только `max_author_revisions` | **База** | `campaign_counters` — представление; хранимых счётчиков нет, второй ручки нет |
@@ -1961,7 +1997,7 @@ INSERT INTO verification_status(status) VALUES ('green'),('red'),('error');
 
 ## 14. Уточнения к `decision.md`
 
-Проектирование и последующее ревью таск-планов обнаружили девятнадцать мест, где
+Проектирование и последующее ревью таск-планов обнаружили двадцать одно место, где
 решение чего-то не учло, и одну возможность (пункт 5). Ни одно из принятых
 решений не отменяется — но без этих уточнений часть из них нереализуема.
 
@@ -2205,11 +2241,36 @@ ID из текста превращает identity в content hash, а INSERT в
 `public_id` с последующим commit делает промежуточное имя наблюдаемым.
 
 T1.7b использует свойство единственного writer. Для finding/question repository
-внутри `BEGIN IMMEDIATE` берёт следующий AUTOINCREMENT номер, одним INSERT
+внутри `BEGIN IMMEDIATE` берёт `COALESCE(current sqlite_sequence, 0) + 1`, одним INSERT
 записывает `id=N` и `public_id=F-N`/`Q-N`. Observation получает следующий
 `seq` кампании и сразу `O-<campaign_id>-<seq>`. Rollback ничего не публикует;
 committed/удалённый INTEGER ID не переиспользуется благодаря AUTOINCREMENT.
 Это локальная persistence-механика, а не новый способ сопоставлять findings.
+
+**21. Строгий гейт существующих `issued`-строк не доказывает полноту roster.**
+Первая версия Q47 проверяла только строки, которые уже есть в
+`finding_round`. Если application layer забывал включить один открытый finding,
+запрос получал пустое множество нарушений, круг закрывался, а finding молча
+переезжал дальше без disposition и решения owner.
+
+Добавлен отдельный положительный гейт §5.2: каждый открытый finding, уже
+связанный с observation этой кампании, обязан иметь строку участия в текущем
+круге. При создании `fix_check` это exact `issued` roster; после проверки новая
+или reopened identity может иметь `post_check`. Гейт выполняется и для
+discovery, и для fix-check непосредственно перед result, а также в recovery.
+T1.3 владеет обоими read-запросами и чтением current-round participants.
+
+**22. Human question нельзя готовить до доменного решения.** Если
+`finalize_fix_check()` принимал заранее построенный envelope, вызывающий должен
+был угадать `dispute`/`cap_exhausted_same`/`cap_exhausted_new`, то есть повторить
+`decide_after_check()` снаружи. Тест с заранее известным cap это маскировал, но
+production-вызов корректно построить было нельзя.
+
+T1.7b владеет чистым синхронным `HumanGateFormatter`-портом и вызывает его
+только после единственного `AskHuman` внутри writer-транзакции. T1.16 реализует
+production-форматирование. Formatter получает готовое решение и контекст, не
+читает БД, не делает I/O и не выбирает reason; returned envelope повторно
+проверяется перед атомарной записью question/outbox/blocker/state/event.
 
 ### Что было неверно в первой редакции этого документа
 

@@ -251,7 +251,8 @@ PRAGMA (все пять), выделенный поток-писатель с о
 ### T1.3 · Схема: репозитории и представления · 2 д
 
 Репозитории по агрегатам, представления `campaign_counters`, `finding_period`,
-`finding_severity`, `run_state`.
+`finding_severity`, `run_state`; typed reads current-round participants,
+незавершённых `issued` и открытых findings кампании без строки текущего круга.
 
 **Готово, когда:** зелены тесты на все инварианты с пометкой **База** и на
 базовую половину инвариантов **База + код** (`db-schema.md` §10). Каждый —
@@ -366,9 +367,12 @@ rollback не оставляет identity, а committed allocator не пере�
 опубликованный INTEGER ID.
 Строки `issued` проходят строгий гейт author revision/owner decision, новый
 finding получает `post_check` без фиктивных ответов и не блокирует закрытие
-текущего круга. Human gate одной транзакцией создаёт branch-scoped blocker и
+текущего круга. Перед result в discovery и fix-check пусты все три гейта:
+unlinked observations, отсутствующее участие открытого finding и incomplete
+`issued`. Human gate одной транзакцией создаёт branch-scoped blocker и
 переводит ветку в `blocked`, поэтому Run без активного соседа показывает
-`waiting_human`.
+`waiting_human`; вопрос форматирует чистый порт только после единственного
+`AskHuman`, а не заранее у вызывающего.
 Follow-up observation и `recurrence` либо появляются вместе с решением, либо вся
 транзакция откатывается; перед каждым `review_round.result` глобальный запрос
 observations без link пуст. Отдельные негативные фикстуры доказывают, что
@@ -487,6 +491,9 @@ allowlist, кнопки. Транспортно-нейтральный outbox и
 Формирование вопроса, стандартные варианты при исчерпании кругов, разбор ответа,
 переспрос с лимитом, `awaiting_continue`. Транспортно-нейтральный
 `notification_outbox` и отправитель `cli`, выдающий ожидающее по команде `ask`.
+Задача реализует production `HumanGateFormatter`-порт T1.7b: он получает уже
+готовый `AskHuman` и immutable context, не читает БД, не выполняет I/O и не
+выбирает reason.
 Для `dispute`/`cap_exhausted_*` свободный текст обязан свестись в одно
 кампанийное действие; смешанная per-finding раскладка не применяется частично и
 не снимает blocker, а запускает переспрос, после лимита — запрос ключа варианта.
