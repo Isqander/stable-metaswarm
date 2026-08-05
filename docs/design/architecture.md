@@ -321,12 +321,21 @@ flowchart TB
 1. Сверить незавершённые внешние эффекты (§8): привести ветку к input_sha
    прерванной авторской попытки, проверить artifact repo по digest,
    дослать неотправленное из outbox.
-2. Проверить полноту: наблюдения без связи, круги с решениями, но без
-   результата, findings без finding_round в открытом круге. Непривязанные
-   observations в открытом круге означают незавершённый reconciliation, который
-   надо продолжить; в круге с уже записанным result это нарушение инварианта.
+2. Проверить полноту: наблюдения без связи; незавершённые `issued`-строки
+   `finding_round`; roster открытого `fix_check` без строки `issued`; круги с
+   решениями, но без результата. `post_check` законен в закрываемом круге:
+   finding вошёл только после проверки и станет `issued` в следующем.
+   Непривязанные observations в открытом круге означают незавершённый
+   reconciliation, который надо продолжить; в круге с уже записанным result
+   это нарушение инварианта.
 3. Проверить граф: циклы, ложный успех (запрос db-schema §9).
-4. Ветки, которые были running → blocked(awaiting_continue).
+4. Проверить пары branch-scoped blocker ↔ `branch.state`: открытый
+   `human_question`/`awaiting_continue` обязан ссылаться на `blocked`-ветку, а
+   `blocked`-ветка — иметь открытую причину. Durable вопрос с ошибочно
+   `running`-веткой до запуска планировщика атомарно восстанавливает
+   `branch.state='blocked'`; обратное расхождение не переводится в `ready`
+   автоматически.
+5. Ветки, которые были running → blocked(awaiting_continue).
 ```
 
 Пункт 4 — не мелочь. Ветка, которая была в работе, после рестарта не готова к
@@ -422,7 +431,8 @@ stateDiagram-v2
 
 `escalated` сначала закрывает **круг**, но не кампанию: пока открыт
 `human_question`, `review_campaign.state = fix_cycle` и `closed_at IS NULL`, а
-ветку удерживает blocker. Если человек разрешает ещё одну правку, увеличивается
+ветку удерживает согласованная пара `branch.state = blocked` + blocker с её
+`branch_id`. Если человек разрешает ещё одну правку, увеличивается
 лимит стадии и та же кампания продолжает self-transition с прежними счётчиками.
 `closed_escalated` выставляется только после окончательного ответа «принять» или
 «остановить» и потому действительно остаётся терминальным.
@@ -461,6 +471,17 @@ findings в facts текущей проверки. После обоих пут�
 `first_round_id == current_round_id` достижим и даёт `cap_exhausted_new` при
 исчерпанном cap. Campaign при этом остаётся в `fix_cycle`: `reconciliation`
 здесь — подшаг круга, а не состояние кампании.
+
+Участие finding в круге при этом не выводится из пустых полей.
+`finding_round.entry_kind = issued` означает roster, который автор видел до
+`fix_check`: перед результатом круга строка обязана ссылаться на
+`preceding_revision_id` через ту же успешную author attempt и иметь успешное
+решение owner. `post_check` создаётся только для target, которого ещё не было в
+текущем круге и который вошёл по результату discovery/reconciliation; все поля
+author/reviewer у него пусты. Такой finding не блокирует закрытие текущего
+круга, но в следующем `fix_check` становится `issued`. Если reconciliation
+связал observation с target, уже представленным строкой `issued`, строка и
+owner не заменяются.
 
 ```python
 def decide_after_check(facts: CheckFacts) -> Decision:
@@ -533,9 +554,11 @@ stateDiagram-v2
   ready --> cancelled: отмена прогона
 ```
 
-«Ждёт человека» — не состояние, а `blocked` **плюс** блокировка типа
-`human_question`. Так CLI показывает причину, а не только факт, и инвариант
-«ветка стоит не просто так» проверяется одним запросом.
+«Ждёт человека» — согласованная пара: физическое состояние `blocked` **плюс**
+открытая блокировка типа `human_question` с `branch_id`. Они пишутся одной
+транзакцией. Так планировщик действительно останавливает ветку, CLI показывает
+причину, а recovery одним двусторонним аудитом ловит и blocker без `blocked`, и
+`blocked` без причины.
 
 ### 6.5. Замечание
 
@@ -636,14 +659,18 @@ answer относится к кампании целиком.
    ├─ агент предлагает группы и классифицирует каждое наблюдение
    ├─ рантайм валидирует: разбиение исчерпывающее, ссылки допустимы,
    │  existing_open только на открытый ID
-   └─ TX: finding (новые ID) + links + событие
+   └─ TX: finding (новые ID) + links
+          + finding_round(entry_kind=post_check) для targets,
+            которых ещё нет в этом круге + событие
 
 4. Цикл правок
    loop:
      ├─ автору: компактный ledger (ID, severity, title, статус)
      ├─ автор возвращает disposition на КАЖДЫЙ открытый ID
-     ├─ TX: finding_round.disposition (все или ни одного)
-     │       + author_revision + attempt.outcome
+     ├─ TX: author_revision + round(kind=fix_check, preceding_revision_id)
+     │       + finding_round(entry_kind=issued, disposition,
+     │                       author_attempt_id) для точного roster
+     │       + attempt.outcome (все или ни одного)
      ├─ владельцу каждого finding'а: проверить исправление или отказ;
      │  still_present/insists может содержать follow-up observation известного ID
      │  и отдельные new_observations
@@ -652,7 +679,11 @@ answer относится к кампании целиком.
      │       + resolutions + unclassified new_observations
      ├─ если new_observations не пусты:
      │    reconciliation T1.5 на текущем fix_check
-     │    → новые finding/links/finding_round
+     │    → новые finding/links
+     │      + finding_round(entry_kind=post_check), только если target ещё не
+     │        представлен строкой текущего круга
+     ├─ assert: каждый finding_round(entry_kind=issued) связан с
+     │          preceding author_revision и успешным решением owner
      ├─ assert: observations текущего round без link отсутствуют
      ├─ собрать open set после всех решений и reconciliation
      ├─ TX: review_round.result + событие
@@ -660,7 +691,8 @@ answer относится к кампании целиком.
 
 5. Закрытие или human gate
    ├─ clean: TX campaign=closed_clean + stage/branch + событие
-   ├─ escalated: TX round=escalated + вопрос/outbox/blocker + событие;
+   ├─ escalated: TX round=escalated + вопрос/outbox
+   │             + blocker(branch_id, question_id) + branch=blocked + событие;
    │             campaign остаётся fix_cycle
    └─ окончательный ответ человека: TX campaign=closed_escalated
                  + stage/branch + resolutions + событие
@@ -717,7 +749,9 @@ Reconciliation T1.5 — единственное место, где выдаёт
 
 ```
 Задать:
-  TX: human_question + notification_outbox + blocker(human_question) + событие
+  TX: human_question + notification_outbox
+      + blocker(human_question, branch_id, question_id)
+      + branch.state=blocked + событие
   ── commit ──
   sender транспорта: отправка, запись transport_message_id
   (падение до отправки → outbox не пуст → отправится после рестарта)
@@ -726,13 +760,13 @@ Reconciliation T1.5 — единственное место, где выдаёт
   tg_poller получает update
   TX: telegram_inbox(PK transport,update_id) + human_answer
       + blocker(human_question).cleared
-      + blocker(awaiting_continue) НОВЫЙ
-      + branch.state + событие
+      + blocker(awaiting_continue, branch_id) НОВЫЙ
+      + branch.state остаётся blocked + событие
   ── commit ──
   дубль того же update_id: PK не даст вставить → обработка идемпотентна
 
 Продолжить:
-  CLI continue → drift check → снять awaiting_continue → ветка ready
+  CLI continue → drift check → одной TX снять awaiting_continue → ветка ready
 ```
 
 Постановка `awaiting_continue` **в той же транзакции**, что и снятие

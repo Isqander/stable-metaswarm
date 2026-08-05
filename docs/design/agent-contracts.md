@@ -306,7 +306,8 @@ reconciliation вернул reopen_closed(F-09, reason)
   где finding_status(F-09).last_authority = 'human'
     │
     ├─ TX: human_question(reason = 'reopen_human_closed')
-    │      + notification_outbox + blocker + событие
+    │      + notification_outbox + blocker(branch_id, question_id)
+    │      + branch.state = blocked + событие
     │      Наблюдение остаётся без связи — круг не закрывается.
     │
     └─ ответ человека:

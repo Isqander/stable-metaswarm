@@ -290,6 +290,9 @@ PRAGMA (все пять), выделенный поток-писатель с о
 известному `finding_id` в T1.5 не входит: при `still_present`/`insists` его
 механически связывает T1.7b после проверки finding/периода в T1.6; закрывающую
 пару раньше отклоняет T1.7 (Q45).
+Reconciliation создаёт `finding_round(entry_kind=post_check)` только для
+target, ещё не представленного в текущем круге; существующая строка `issued` и
+её owner не заменяются (Q47).
 
 **Готово, когда:** потерянное наблюдение, наблюдение в двух группах, ссылка на
 закрытый ID в `existing_open`, `reopen_closed` без причины — каждое даёт
@@ -358,6 +361,11 @@ reconciliation → severity и кап → вопрос человеку `cap_exh
 finding имеет `first_round_id` последнего `fix_check`, причина вопроса равна
 `cap_exhausted_new`, а все значения (`escalation_severity`, счётчики, статус
 finding'а) читаются из базы через те же представления, что будет читать рантайм.
+Строки `issued` проходят строгий гейт author revision/owner decision, новый
+finding получает `post_check` без фиктивных ответов и не блокирует закрытие
+текущего круга. Human gate одной транзакцией создаёт branch-scoped blocker и
+переводит ветку в `blocked`, поэтому Run без активного соседа показывает
+`waiting_human`.
 Follow-up observation и `recurrence` либо появляются вместе с решением, либо вся
 транзакция откатывается; перед каждым `review_round.result` глобальный запрос
 observations без link пуст. Отдельные негативные фикстуры доказывают, что

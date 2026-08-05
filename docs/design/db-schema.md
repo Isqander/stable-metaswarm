@@ -1,11 +1,11 @@
 # Схема состояния: SQLite
 
-Дата: 2026-08-04. Статус: четвёртая редакция после внешнего ревью. Связная DDL из
-документа впервые исполнена целиком в SQLite in-memory: 60 таблиц, 24 индекса,
+Дата: 2026-08-05. Статус: пятая редакция после внешнего ревью. Связная DDL из
+документа исполнена целиком в SQLite in-memory: 61 таблица, 24 индекса,
 6 представлений и 6 триггеров; `PRAGMA foreign_key_check` чист. Отдельными
 негативными вставками проверены enum-FK, policy verdict и производные состояния
 `idle`/`cancelling`; после четвёртой редакции повторный полный прогон сохранил
-inventory `60/24/6/6`, а новый CHECK принял обе согласованные пары
+inventory `61/24/6/6`, а CHECK-и приняли согласованные пары
 `review_campaign.state`/`closed_at` и отверг обе рассогласованные. Ранее
 проверенные несущие конструкции также остаются в наборе: составные FK
 `author_revision`, партиальные уникальные индексы, XOR наблюдения, триггер
@@ -27,7 +27,7 @@ DDL. Документ отвечает на вопрос, на который р
 | Порядок работ | `task-plans.md` |
 
 В конце — §14: список мест, где проектирование **уточнило или дополнило**
-решение. Читать обязательно: там семнадцать уточнений с обоснованием, включая одну
+решение. Читать обязательно: там девятнадцать уточнений с обоснованием, включая одну
 необязательную возможность.
 
 ---
@@ -113,6 +113,7 @@ CREATE TABLE run_terminal_state      (state     TEXT PRIMARY KEY);
 CREATE TABLE campaign_state          (state     TEXT PRIMARY KEY);
 CREATE TABLE review_round_kind       (kind      TEXT PRIMARY KEY);
 CREATE TABLE round_result            (result    TEXT PRIMARY KEY);
+CREATE TABLE finding_round_entry_kind(entry_kind TEXT PRIMARY KEY);
 CREATE TABLE subject_kind            (kind      TEXT PRIMARY KEY);
 CREATE TABLE link_type               (link_type TEXT PRIMARY KEY);
 CREATE TABLE disposition             (value     TEXT PRIMARY KEY);
@@ -190,7 +191,8 @@ review-домен     review_subject, review_campaign, review_lane, review_round
 справочники      severity_scale, attempt_outcome, attempt_role,
                  heartbeat_source, branch_kind, branch_state,
                  run_terminal_state, campaign_state, review_round_kind,
-                 round_result, subject_kind, link_type, disposition,
+                 round_result, finding_round_entry_kind, subject_kind,
+                 link_type, disposition,
                  reviewer_decision, resolution_authority, resolution_kind,
                  blocker_kind, task_state, title_authority, question_reason,
                  transport_kind, artifact_kind, artifact_producer,
@@ -585,22 +587,49 @@ FROM review_campaign c;
 Формулируется так же — запросом:
 
 ```sql
--- Круг нельзя закрыть, пока не выполнены оба условия.
--- 1. У каждого открытого finding'а есть решение владельца в этом круге.
--- 2. Каждое такое решение вынесено попыткой с outcome = 'succeeded'.
+-- Круг нельзя закрыть, пока каждая строка issued не прошла тот же
+-- author_revision, который проверяет этот fix_check, и решение владельца
+-- не вынесено успешной reviewer-попыткой той же стадии.
 SELECT fr.finding_id
   FROM finding_round fr
+  JOIN review_round rr
+    ON rr.campaign_id = fr.campaign_id AND rr.round_no = fr.round_no
+  JOIN review_campaign c ON c.id = fr.campaign_id
+  LEFT JOIN author_revision ar
+    ON ar.id = rr.preceding_revision_id AND ar.campaign_id = fr.campaign_id
+  LEFT JOIN step_attempt d ON d.id = fr.author_attempt_id
   LEFT JOIN step_attempt a ON a.id = fr.reviewer_attempt_id
  WHERE fr.campaign_id = :campaign_id AND fr.round_no = :round_no
-   AND (fr.reviewer_decision IS NULL
+   AND fr.entry_kind = 'issued'
+   AND (rr.kind <> 'fix_check'
+        OR ar.id IS NULL
+        OR fr.disposition IS NULL
+        OR fr.author_attempt_id IS NULL
+        OR fr.author_attempt_id <> ar.attempt_id
+        OR d.id IS NULL
+        OR d.role <> 'author'
+        OR d.outcome <> 'succeeded'
+        OR d.stage_id <> c.stage_id
+        OR fr.reviewer_decision IS NULL
         OR a.id IS NULL
+        OR a.role <> 'reviewer'
         OR a.outcome <> 'succeeded'
+        OR a.stage_id <> c.stage_id
         OR a.lane_id <> fr.owner_lane_id);
 ```
 
 Пустой результат — необходимое условие для записи `review_round.result`. Тот же
 запрос гоняется в recovery audit: если сервис упал между записью решений и
-закрытием круга, круг останется открытым, и это правильно.
+закрытием круга, круг останется открытым, и это правильно. Строки `post_check`
+в этот запрос намеренно не входят: identity создана или переоткрыта уже после
+текущей проверки, автор её ещё не видел. У такой строки все поля
+author/reviewer пусты по CHECK ниже; в следующем `fix_check` открытый finding
+получает отдельную строку `issued`.
+
+Признак положительный, а не выводится из NULL. Иначе незавершённый `issued`,
+ради которого существует гейт, выглядел бы точно как законный `post_check` и
+молча обходил проверку. Для primary discovery строки, созданные reconciliation,
+также имеют `post_check`: до первой авторской правки иных строк быть не может.
 
 Что база всё же гарантирует: `review_round.result` и `closed_at` выставляются
 только вместе (`CHECK`), так что «закрытый круг без результата» невозможен.
@@ -834,6 +863,7 @@ CREATE TABLE finding_round (
   finding_id          INTEGER NOT NULL REFERENCES finding(id),
   round_no            INTEGER NOT NULL,
   owner_lane_id       INTEGER NOT NULL REFERENCES review_lane(id),
+  entry_kind          TEXT    NOT NULL REFERENCES finding_round_entry_kind(entry_kind),
   disposition         TEXT REFERENCES disposition(value),
   disposition_reason  TEXT,
   author_attempt_id   INTEGER REFERENCES step_attempt(id),
@@ -841,6 +871,21 @@ CREATE TABLE finding_round (
   reviewer_attempt_id INTEGER REFERENCES step_attempt(id),
   decided_at          INTEGER,
   UNIQUE (campaign_id, finding_id, round_no),
+  -- post_check появился после проверки: авторского и reviewer-ответа ещё нет.
+  CHECK (
+    entry_kind <> 'post_check'
+    OR (disposition IS NULL
+        AND disposition_reason IS NULL
+        AND author_attempt_id IS NULL
+        AND reviewer_decision IS NULL
+        AND reviewer_attempt_id IS NULL
+        AND decided_at IS NULL)
+  ),
+  -- Частично записанные пары не считаются состоявшимся ответом.
+  CHECK ((disposition IS NULL) = (author_attempt_id IS NULL)),
+  CHECK (disposition IS NOT NULL OR disposition_reason IS NULL),
+  CHECK ((reviewer_decision IS NULL) = (reviewer_attempt_id IS NULL)),
+  CHECK ((reviewer_decision IS NULL) = (decided_at IS NULL)),
   -- Отказ обязан быть обоснован.
   CHECK (disposition NOT IN ('rejected','wont_fix') OR disposition_reason IS NOT NULL),
   -- Инвариант 10: исход ревьюера совместим с disposition автора.
@@ -877,6 +922,14 @@ CREATE INDEX ix_finding_round_finding ON finding_round (finding_id);
 `reviewer_decision` одна колонка одной строки: второго решения записать некуда.
 Код при этом обязан проверить, что `reviewer_attempt_id` принадлежит линии
 `owner_lane_id` — это констрейнтом не выражается, потому что требует join.
+
+`entry_kind = issued` создаётся для точного roster, который автор получил до
+`fix_check`; его `author_attempt_id` обязан совпасть с попыткой
+`review_round.preceding_revision_id`, что проверяет гейт §5.2. Reconciliation
+создаёт `post_check` только если target ещё не представлен в текущем круге.
+Владелец такой строки — минимальный `lane_index` среди observations, впервые
+введших target в этот круг; существующую строку `issued` и её owner менять
+нельзя.
 
 ```sql
 -- Справочник обязателен: без FK неизвестное значение resolution проваливает
@@ -1350,6 +1403,45 @@ CREATE INDEX ix_blocker_open ON blocker (run_id, kind) WHERE cleared_at IS NULL;
 
 Партиальный индекс по открытым блокировкам — это и есть быстрый ответ на «что
 сейчас ждёт человека» (`decision.md` §5, требование индексов с первого дня).
+Для branch-scoped вопроса одной строки blocker недостаточно: в той же
+транзакции `branch_id` и `question_id` обязательны, а `branch.state`
+переводится в `blocked`. Nullable `branch_id` сохраняется для вопросов уровня
+Run, но review-вопрос всегда branch-scoped.
+
+Recovery проверяет связь в обе стороны до запуска планировщика:
+
+```sql
+-- Открытый branch-scoped human gate не может оставить ветку рабочей.
+SELECT bl.id, bl.branch_id
+  FROM blocker bl
+  JOIN branch b ON b.id = bl.branch_id
+ WHERE bl.cleared_at IS NULL
+   AND bl.kind IN ('human_question', 'awaiting_continue')
+   AND b.state <> 'blocked';
+
+-- Заблокированная ветка не может остаться без durable-причины.
+SELECT b.id
+  FROM branch b
+ WHERE b.state = 'blocked'
+   AND NOT EXISTS (
+     SELECT 1 FROM blocker bl
+      WHERE bl.branch_id = b.id AND bl.cleared_at IS NULL
+   );
+
+-- Открытый branch-scoped вопрос обязан иметь matching blocker.
+SELECT q.id, q.branch_id
+  FROM human_question q
+  LEFT JOIN blocker bl
+    ON bl.question_id = q.id
+   AND bl.branch_id = q.branch_id
+   AND bl.kind = 'human_question'
+   AND bl.cleared_at IS NULL
+ WHERE q.branch_id IS NOT NULL AND q.answered_at IS NULL
+   AND bl.id IS NULL;
+```
+
+Первый и третий случаи восстанавливаются атомарно из durable-вопроса до
+readiness; второй никогда не лечится переводом в `ready` по догадке.
 
 ### 6.3. Append-only журнал событий
 
@@ -1390,7 +1482,8 @@ timestamps, которые в одной транзакции совпадают
 
 ### 6.5. Состояние прогона — представление
 
-Инвариант 22: `Run` вычисляется из веток и блокировок.
+Инвариант 22: `Run` вычисляется из состояний веток; blocker и физическое
+`branch.state` обязаны быть синхронизированы транзакцией и recovery-аудитом.
 
 ```sql
 CREATE VIEW run_state AS
@@ -1655,28 +1748,28 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 
 | # | Инвариант | Держит | Чем |
 |---|---|---|---|
-| 1 | Каждое открытое замечание закрыто явным статусом | **Код** | Проверка покрытия открытых ID до записи dispositions; круг не закрывается частично |
+| 1 | Каждый `issued` finding получил disposition автора и решение владельца; `post_check` переносит работу в следующий круг | **База + код** | `entry_kind` — enum FK и CHECK формы строки; полный запрос §5.2 связывает `issued` с `preceding_revision_id`, успешными author/reviewer attempts и owner; `post_check` из гейта исключён явно |
 | 2 | Каждое наблюдение получает ровно одну связь: через reconciliation либо детерминированную `recurrence` известного target только при `still_present`/`insists` | **База + код** | `finding_observation_link.observation_id` PK — не даст двух связей; допустимость решения и полнота — код до транзакции и глобальный запрос перед `review_round.result` |
 | 3 | `existing_open` — только открытый ID; `reaffirmed_closed` — только закрытый через `accepted_reason`; `reopen_closed` — любой закрытый ID | **Код** | Валидация на приёме по `finding_status`: status и `last_resolution` проверяются до записи |
 | 4 | Счётчиков два, независимы; настраивается только `max_author_revisions` | **База** | `campaign_counters` — представление; хранимых счётчиков нет, второй ручки нет |
-| 5 | Оба растут только после `succeeded` | **База + код** | `author_revision` — составные FK `(attempt_id, role)` и `(attempt_id, outcome)`; `review_check_count` считает `review_round.result`, который база с попыткой связать не может — см. ниже |
+| 5 | Оба растут только после `succeeded` | **База + код** | `author_revision` — составные FK `(attempt_id, role)` и `(attempt_id, outcome)`; перед `review_round.result` запрос §5.2 связывает каждую `issued`-строку с той же author revision и успешным решением owner |
 | 6 | Кап проверяется в момент решения «продолжать ли» | **Код** | Единственная точка принятия решения в `review.transition`; проверка `review_check_count <= max_author_revisions + 1` — assert, а не гейт |
 | 7 | Личность выдаётся один раз | **База** | `finding.public_id` UNIQUE в прогоне; `first_observation_id` UNIQUE; пересчёта нет в коде |
 | 8 | Каждое наблюдение несёт `severity_suggested` либо `unchanged_from`; severity в enum; ссылка назад, без циклов | **База + код** | `CHECK ((a IS NULL) <> (b IS NULL))`, FK на `severity_scale`, триггер обратной ссылки и равенства унаследованной severity; «тот же finding и период» — T1.6 до direct link либо после reconciliation |
 | 9 | `escalation_severity` монотонна вверх | **База** | Вычисляется `MAX(rank)` по периоду; понизить нечего |
 | 10 | Исход ревьюера совместим с disposition | **База** | CHECK в `finding_round` — **с явной проверкой `disposition IS NOT NULL`**, иначе NULL проходит |
-| 11 | Решение выносит владелец круга, оно единственное | **База + код** | Одна колонка `reviewer_decision`; принадлежность попытки владельцу — код |
+| 11 | Решение выносит владелец круга, оно единственное | **База + код** | Одна колонка `reviewer_decision`; запрос §5.2 проверяет роль, stage, outcome и `lane_id = owner_lane_id`; у `post_check` решения быть не может по CHECK |
 | 12 | Новая кампания не получает прежнюю сессию | **База + код** | `reviewer_exposure` + отбор линий по свободным парам provider+model |
 | 13 | У каждого закрытия записан `resolution_authority`; reopen следует ему | **База + код** | FK на `resolution_kind` + CHECK с `ELSE` выводят authority из resolution; маршрутизация reopen — код |
 | 14 | Переход и событие — одна транзакция | **Код** | Единственный writer, `store.transaction()` пишет событие вместе с переходом |
-| 15 | Все переходы §6.6 атомарны целиком | **Код** | Шесть именованных транзакционных операций, см. `architecture.md` §6 |
-| 16 | Ответ записан до снятия блокировки | **Код** | Порядок внутри одной транзакции |
+| 15 | Все переходы §6.6 атомарны целиком | **Код** | Шесть именованных транзакционных операций; branch-scoped вопрос включает blocker с обеими ссылками и `branch.state='blocked'` |
+| 16 | Ответ записан до снятия блокировки | **Код** | Ответ, clear `human_question` и новый `awaiting_continue` пишутся одной TX; ветка остаётся `blocked` |
 | 17 | После перезапуска нет двойного перехода и двойной работы | **Код** | Recovery audit: `outcome IS NULL` → `interrupted`; новая попытка после подтверждения смерти pgid |
 | 18 | Один экземпляр сервиса на каталог | **ОС** | `flock` на файле + lease с heartbeat |
 | 19 | Не более одной активной попытки на линию или шаг | **База** | Partial unique index `ux_attempt_active` |
 | 20 | Один принятый ответ; `UNIQUE(transport, update_id)` | **База** | `UNIQUE(question_id)` в `human_answer`; PK в `telegram_inbox` |
-| 21 | FK между кампанией, кругом, замечанием, наблюдением, попыткой; `UNIQUE(campaign_id, finding_id, round_no)` | **База** | FK и UNIQUE прямо в DDL |
-| 22 | Состояние `Run` вычисляется | **База** | `run_state` — представление; колонки состояния нет |
+| 21 | FK между кампанией, кругом, замечанием, наблюдением, попыткой; `UNIQUE(campaign_id, finding_id, round_no)` | **База** | FK, `entry_kind` FK и UNIQUE прямо в DDL |
+| 22 | Состояние `Run` вычисляется; branch blocker согласован с физическим состоянием ветки | **База + код** | `run_state` — представление; атомарная запись пары и три recovery-запроса §6.2 |
 | 23 | Нет self-edge, дублей, циклов; смысловой ID уникален | **База + код** | CHECK и PK; `UNIQUE(import_id, semantic_task_id)` + партиальный индекс на активную версию; цикл — обход внутри той же транзакции |
 | 24 | Пустая готовность без блокировки = `invalid_graph` | **Код** | Запрос §9, выполняется планировщиком и recovery audit |
 | 25 | Запись в граф только атомарным импортом | **Код** | Единственный метод `task_graph.import_revision()`; прямых INSERT нет |
@@ -1686,8 +1779,8 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 29 | Прореживание меняет только файл заметок | **Код** | Шаг с явным allowlist путей, проверка diff перед коммитом |
 | 30 | `review_campaign.closed_at` заполнен только у терминальной кампании и обязателен для неё | **База** | CHECK связывает три `closed_*` значения с `closed_at IS NOT NULL` в обе стороны |
 
-**Итог: 9 инвариантов из 30 держит база целиком, 7 — совместно с кодом, 1 —
-операционная система (`flock`), 1 — конфигурация, 12 — код.**
+**Итог: 8 инвариантов из 30 держит база целиком, 9 — совместно с кодом, 1 —
+операционная система (`flock`), 1 — конфигурация, 11 — код.**
 
 Первая редакция заявляла 12 / 5 / 12, и это было завышением дважды. Сначала —
 потому что три «гарантированных базой» констрейнта на деле не работали (CHECK с
@@ -1722,12 +1815,12 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 
 | Переход | Таблицы в одной транзакции |
 |---|---|
-| Задан вопрос человеку | `human_question` + `notification_outbox` + `blocker` + `run_event` |
-| Получен ответ | `telegram_inbox.handled_at` + `human_answer` + `blocker.cleared_at` + новый `blocker(awaiting_continue)` + `branch.state` + review-следствие (`stage_execution.max_author_revisions += 1` при дополнительной правке либо `review_campaign.state='closed_escalated'` при окончательном ответе) + `run_event` |
+| Задан branch-scoped вопрос человеку | `human_question` + `notification_outbox` + `blocker(branch_id, question_id)` + `branch.state='blocked'` + `run_event` |
+| Получен ответ | `telegram_inbox.handled_at` + `human_answer` + `blocker(human_question).cleared_at` + новый `blocker(awaiting_continue, branch_id)` + сохранённый `branch.state='blocked'` + review-следствие (`stage_execution.max_author_revisions += 1` при дополнительной правке либо `review_campaign.state='closed_escalated'` при окончательном ответе) + `run_event` |
 | Задача выполнена | `step_attempt.outcome` + `task.state='done'` + пересчёт готовности зависимых + `run_event` |
 | Круг ревью закрыт | Все `finding_round` круга + `review_round.result` + `finding_resolution` по закрытым + состояние кампании (`closed_clean` при успехе; прежний `fix_cycle` при `escalated` до ответа человека) + `run_event` |
 | Импорт графа | `task_graph_import` + `task` + `task_dependency` + инвалидация задач прежней ревизии + `run_event` |
-| Эскалация | `review_round.result='escalated'` + `human_question(snapshot_json)` + `notification_outbox` + `blocker` + сохранённый `review_campaign.state='fix_cycle'` + `run_event` |
+| Эскалация | `review_round.result='escalated'` + `human_question(snapshot_json)` + `notification_outbox` + `blocker(branch_id, question_id)` + `branch.state='blocked'` + сохранённый `review_campaign.state='fix_cycle'` + `run_event` |
 
 Отдельная атомарная операция внутри открытого `fix_check` не добавляет нового
 перехода машины состояний, но тоже неделима: follow-up `review_observation`
@@ -1762,6 +1855,8 @@ INSERT INTO round_result(result) VALUES
   ('clean'),('needs_revision'),('escalated');
 
 INSERT INTO review_round_kind(kind) VALUES ('discovery'),('fix_check');
+
+INSERT INTO finding_round_entry_kind(entry_kind) VALUES ('issued'),('post_check');
 
 INSERT INTO branch_state(state) VALUES
   ('ready'),('running'),('retry_wait'),('blocked'),('done'),('failed'),('cancelled');
@@ -1847,7 +1942,7 @@ INSERT INTO verification_status(status) VALUES ('green'),('red'),('error');
 
 ## 14. Уточнения к `decision.md`
 
-Проектирование и последующее ревью таск-планов обнаружили шестнадцать мест, где
+Проектирование и последующее ревью таск-планов обнаружили восемнадцать мест, где
 решение чего-то не учло, и одну возможность (пункт 5). Ни одно из принятых
 решений не отменяется — но без этих уточнений часть из них нереализуема.
 
@@ -2051,6 +2146,37 @@ ID title запрещают. Cut-off получил структурные по�
 (существование пути/SHA, scoped ledger, policy allow/deny lists) приходят
 T1.7 immutable snapshot-контекстом; владелец домена или эффекта повторно
 проверяет несущий инвариант перед записью/исполнением.
+
+**18. Finding, вошедший после проверки, не обязан иметь фиктивный ответ автора
+в текущем круге.** После Q13a reconciliation `new_observations` создаёт новую
+identity внутри уже выполняющегося `fix_check`. Первая версия гейта §5.2
+проверяла все `finding_round` одинаково и требовала от такой строки disposition
+и reviewer decision, которых физически ещё не могло быть. Тот же дефект
+возникал в primary discovery. Выводить исключение по NULL опасно: незавершённый
+выданный finding выглядит точно так же и обходит гейт.
+
+По явному решению владельца Q47 введён закрытый `entry_kind`: `issued` для
+roster, который автор видел до текущей проверки, и `post_check` для identity,
+созданной или переоткрытой только по её результату. CHECK делает все поля
+author/reviewer у `post_check` пустыми; строгий гейт проверяет только `issued` и
+связывает её author attempt с `review_round.preceding_revision_id`. В следующем
+`fix_check` открытый finding получает новую строку `issued`. Если target уже
+представлен в текущем круге, reconciliation не создаёт дубль. Изменение
+потребовало нового enum-справочника и увеличило inventory до `61/24/6/6`.
+
+**19. Durable human gate обязан физически остановить branch.** Первая версия
+атомарной операции создавала `human_question` и blocker, но не переводила
+`branch.state` в `blocked`. Представление `run_state` читает состояния веток,
+поэтому Run продолжал выглядеть `running`, а планировщик имел право взять
+следующий шаг — вопреки уже записанному правилу «ветка стоит».
+
+По явному решению владельца Q48 любой branch-scoped вопрос одной транзакцией
+пишет blocker с `branch_id`/`question_id`, переводит ветку в `blocked` и пишет
+событие. Ответ заменяет `human_question` на `awaiting_continue`, не меняя
+`blocked`; только `continue` возвращает `ready`. Recovery проверяет пару в обе
+стороны и никогда не разблокирует ветку по отсутствию строки наугад. Это не
+останавливает соседние ветки: при наличии любой активной Run остаётся
+`running`, иначе вычисляется `waiting_human`.
 
 ### Что было неверно в первой редакции этого документа
 
