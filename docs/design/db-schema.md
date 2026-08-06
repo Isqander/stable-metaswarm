@@ -2,16 +2,17 @@
 
 **Инвентарь ниже устарел намеренно.** Числа `61/24/6/6` относятся к шестой
 редакции; после неё в §5.2 и §4 вошла модель effective roster (C-01b свода
-ревью P1-A) — **+2 таблицы, +2 индекса, +1 представление, +7 триггеров**, — а
+ревью P1-A) — **+2 таблицы, +2 индекса, +1 представление, +9 триггеров**, — а
 остальные schema-effects того же свода (составные FK, триггеры `BEFORE DELETE`,
 ограничение `max_author_revisions`) вносятся одним DDL-заходом следом. Связный
 прогон DDL и пересчёт inventory выполняются **один раз** после него, чтобы не
 считать одно и то же дважды. Конструкции effective roster при этом уже
-проверены отдельным прогоном на SQLite 3.45: 38 сценариев с машинными
+проверены отдельным прогоном на SQLite 3.45: 44 сценария с машинными
 ожиданиями, включая контрпример «одна линия вернула `[]`, вторая не
 завершилась», замену исполнителя, повтор замены после падения, запрет
-параллельной работы двух поколений слота, cross-campaign ссылки и формы строки
-попытки по роли. Прогон воспроизводится и падает ненулевым кодом:
+параллельной работы двух поколений слота, cross-campaign ссылки, формы строки
+попытки по роли и попытку потратить один ответ человека дважды. Прогон
+воспроизводится и падает ненулевым кодом:
 `python3 scripts/checks/run-sql-check.py scripts/checks/roster-model.sql`.
 
 Дата: 2026-08-05. Статус: шестая редакция после ревью T1.7b. Связная DDL из
@@ -363,7 +364,9 @@ CREATE TABLE step_attempt (
   -- вовсе. Без этого reviewer-попытка без линии тихо не попадает ни в один
   -- гейт участия.
   CHECK (role <> 'reviewer'   OR (round_id IS NOT NULL AND lane_id IS NOT NULL)),
-  CHECK (role <> 'reconciler' OR round_id IS NOT NULL),
+  CHECK (role <> 'reconciler' OR (round_id IS NOT NULL
+                                  AND lane_id IS NULL
+                                  AND lane_assignment_id IS NULL)),
   CHECK (role NOT IN ('author', 'planner')
          OR (campaign_id IS NULL AND round_id IS NULL
              AND lane_id IS NULL AND lane_assignment_id IS NULL))
@@ -404,6 +407,14 @@ Reviewer-попытка без `lane_id` формально не принадл�
 ревьюера была, а доказать её нечем. Автор и планировщик, наоборот, не должны
 получать review-координат вовсе: `lane_id` у авторской попытки означал бы, что
 правку писала линия проверки.
+
+**Reconciler — круг без линии, и это ровно то, что говорит контракт**
+(`agent-contracts.md` §4.3: «Отдельная роль `reconciler`, не линия», свежая
+сессия, профиль из конфига стадии). `lane_id` у такой попытки не просто лишний:
+с ним `ux_attempt_active` перестаёт держать единственность, потому что ключ
+включает слот — и на одной стадии можно завести столько активных reconciler'ов,
+сколько линий. С `lane_id IS NULL` они схлопываются в `COALESCE(lane_id, -1)`,
+и вторая активная попытка не вставляется.
 
 `actual_model` заполняется при завершении, потому что до запуска он неизвестен:
 у `claude-z` запрос `opus` возвращает `glm-5.2`. Правило свежести ревьюера
@@ -633,6 +644,26 @@ BEGIN
   SELECT RAISE(ABORT, 'lane_waiver rows are never deleted');
 END;
 
+-- Один ответ человека — одно действие. Два раздельных UNIQUE этого не дают:
+-- каждый следит за своей таблицей, и тот же ответ ложится и заменой, и
+-- waiver'ом. Проверка межтабличная, поэтому триггер, а не констрейнт.
+CREATE TRIGGER trg_lane_assignment_answer_xor
+BEFORE INSERT ON lane_assignment
+WHEN NEW.human_answer_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'answer already spent on a lane waiver')
+  WHERE EXISTS (SELECT 1 FROM lane_waiver w
+                 WHERE w.human_answer_id = NEW.human_answer_id);
+END;
+
+CREATE TRIGGER trg_lane_waiver_answer_xor
+BEFORE INSERT ON lane_waiver
+BEGIN
+  SELECT RAISE(ABORT, 'answer already spent on a lane replacement')
+  WHERE EXISTS (SELECT 1 FROM lane_assignment a
+                 WHERE a.human_answer_id = NEW.human_answer_id);
+END;
+
 -- Effective roster: слоты кампании с текущим исполнителем. Активное
 -- назначение — то, которое никто не заменил.
 CREATE VIEW effective_roster AS
@@ -711,15 +742,25 @@ SELECT l.id AS lane_id
 
 -- И отдельно: хотя бы одно мнение. Иначе два последовательных waiver
 -- закрывают круг из двух линий вообще без проверки, и он выглядит как clean.
-SELECT COUNT(*) AS succeeded_lanes
-  FROM step_attempt a
- WHERE a.round_id = :round_id AND a.role = 'reviewer'
-   AND a.outcome = 'succeeded';   -- обязано быть >= 1
+-- Запрос тоже самозащищён по kind: в fix_check линии не обязаны работать
+-- вовсе, и без фильтра он давал бы ложное нарушение на штатном круге.
+SELECT rr.id AS round_id
+  FROM review_round rr
+ WHERE rr.id = :round_id
+   AND rr.kind = 'discovery'
+   AND NOT EXISTS (
+         SELECT 1 FROM step_attempt a
+          WHERE a.round_id = rr.id
+            AND a.role     = 'reviewer'
+            AND a.outcome  = 'succeeded');
 ```
 
-Гейт принимает **только `round_id`**, а кампанию и номер круга выводит join'ом:
-три независимых параметра `(campaign_id, round_no, round_id)` позволяют
-проверить один круг, а закрыть другой.
+Оба запроса принимают **только `round_id`**, а кампанию, номер и вид круга
+выводят сами: три независимых параметра `(campaign_id, round_no, round_id)`
+позволяют проверить один круг, а закрыть другой, а вынесенный наружу фильтр по
+`kind` рано или поздно забудут в одном из двух мест. Поэтому на круге
+`fix_check` оба запроса пусты по построению, и вызывающему не нужно помнить, к
+какому виду круга гейт применим.
 
 Контрпример, ради которого гейт написан: первая линия вернула `[]` и завершилась
 успехом, вторая не завершилась вовсе. Три прежних гейта пусты — unlinked
@@ -765,8 +806,16 @@ discovery, во втором круге законно не участвует. 
   при наборе линий, — свежесть по `reviewer_exposure` и запрет пары автора
   ревизии.
 - `waive_lane_for_round(campaign_id, round_no, lane_id, human_answer_id)` —
-  строка `lane_waiver`. Предусловие: ответ человека на `lane_failure` с
-  вариантом «продолжить деградированным кворумом».
+  строка `lane_waiver`. Предусловия: ответ человека на `lane_failure` с
+  вариантом «продолжить деградированным кворумом» и круг `discovery`.
+
+Waiver тоже ограничен `discovery`, и по той же причине, что и замена: в
+`fix_check` он ничего не решает. Пропустить там можно только владельца открытых
+findings, а его строки `issued` всё равно требуют решения — finding-coverage
+gate не пройдёт. Записанный waiver стал бы durable no-op: человек ответил,
+система что-то сохранила, ветка всё равно встала. Значит и набор вариантов в
+самом вопросе `lane_failure` зависит от вида круга: в `discovery` их три, в
+`fix_check` при действующем Q57-A остаётся один — остановить ветку.
 
 Обе — repository-операции внутри чужой транзакции, без собственных границ
 коммита. Повтор при доставке того же ответа останавливают `UNIQUE (question_id)`
@@ -2242,8 +2291,12 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 дальше с ним.
 
 Повтор доставки того же ответа отсекается на входе (`UNIQUE (question_id)` в
-`human_answer`, PK в `telegram_inbox`), а `UNIQUE (human_answer_id)` в
-`lane_assignment` и `lane_waiver` не даёт одному ответу породить два действия.
+`human_answer`, PK в `telegram_inbox`). Внутри review-домена один ответ даёт
+ровно одно действие, и это две разные проверки: `UNIQUE (human_answer_id)` в
+каждой таблице запрещает повтор того же вида, а встречные триггеры
+`trg_*_answer_xor` — комбинацию «тем же ответом и заменили линию, и понизили
+кворум». Раздельных уникальностей для этого мало: каждая видит только свою
+таблицу.
 
 Обратите внимание на переход «Получен ответ»: **на место снятой блокировки
 `human_question` ставится `awaiting_continue`** — в той же транзакции. Иначе

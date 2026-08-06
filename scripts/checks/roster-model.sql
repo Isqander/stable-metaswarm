@@ -135,6 +135,23 @@ BEGIN
   SELECT RAISE(ABORT, 'lane_waiver rows are never deleted');
 END;
 
+CREATE TRIGGER trg_lane_assignment_answer_xor
+BEFORE INSERT ON lane_assignment
+WHEN NEW.human_answer_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'answer already spent on a lane waiver')
+  WHERE EXISTS (SELECT 1 FROM lane_waiver w
+                 WHERE w.human_answer_id = NEW.human_answer_id);
+END;
+
+CREATE TRIGGER trg_lane_waiver_answer_xor
+BEFORE INSERT ON lane_waiver
+BEGIN
+  SELECT RAISE(ABORT, 'answer already spent on a lane replacement')
+  WHERE EXISTS (SELECT 1 FROM lane_assignment a
+                 WHERE a.human_answer_id = NEW.human_answer_id);
+END;
+
 CREATE TABLE step_attempt (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
   stage_id           INTEGER NOT NULL,
@@ -152,7 +169,9 @@ CREATE TABLE step_attempt (
   CHECK ((campaign_id IS NULL) = (round_id IS NULL)),
   CHECK (lane_id IS NULL OR round_id IS NOT NULL),
   CHECK (role <> 'reviewer'   OR (round_id IS NOT NULL AND lane_id IS NOT NULL)),
-  CHECK (role <> 'reconciler' OR round_id IS NOT NULL),
+  CHECK (role <> 'reconciler' OR (round_id IS NOT NULL
+                                  AND lane_id IS NULL
+                                  AND lane_assignment_id IS NULL)),
   CHECK (role NOT IN ('author', 'planner')
          OR (campaign_id IS NULL AND round_id IS NULL
              AND lane_id IS NULL AND lane_assignment_id IS NULL))
@@ -198,7 +217,7 @@ VALUES (1, 1, 1, 'p-a', 'anthropic', 'opus', 1, 100),
        (4, 4, 1, 'p-d', 'zai',       'glm',  1, 100);
 
 -- @step 01 roster кампании 1 после набора
--- @expect rows=2
+-- @expect rows-json [[0, "p-a", 1], [1, "p-b", 1]]
 SELECT lane_index, profile_id, generation FROM effective_roster
  WHERE campaign_id = 1 ORDER BY lane_index;
 
@@ -249,7 +268,7 @@ INSERT INTO lane_assignment(id, lane_id, generation, profile_id, provider, model
 VALUES (5, 2, 2, 'p-e', 'minimax', 'm2', 2, 1, 1, 200);
 
 -- @step 08 roster после замены: размер прежний, исполнитель новый
--- @expect rows=2
+-- @expect rows-json [[0, "p-a", 1], [1, "p-e", 2]]
 SELECT lane_index, profile_id, generation FROM effective_roster
  WHERE campaign_id = 1 ORDER BY lane_index;
 
@@ -322,6 +341,23 @@ VALUES (7, 'author', 1, 1, 1, 1, NULL);
 INSERT INTO step_attempt(stage_id, role, campaign_id, round_id, lane_id, lane_assignment_id, outcome)
 VALUES (7, 'author', NULL, NULL, NULL, NULL, NULL);
 
+-- @step 23a reconciler на линии: контракт даёт ему свою роль, а не слот
+-- @expect error CHECK
+INSERT INTO step_attempt(stage_id, role, campaign_id, round_id, lane_id, lane_assignment_id, outcome)
+VALUES (7, 'reconciler', 1, 1, 1, 1, NULL);
+
+-- @step 23b reconciler с кругом и без линии
+-- @expect ok
+INSERT INTO step_attempt(stage_id, role, campaign_id, round_id, lane_id, lane_assignment_id, outcome)
+VALUES (7, 'reconciler', 1, 1, NULL, NULL, NULL);
+
+-- @step 23c второй активный reconciler той же стадии
+-- @expect error ux_attempt_active
+INSERT INTO step_attempt(stage_id, role, campaign_id, round_id, lane_id, lane_assignment_id, outcome)
+VALUES (7, 'reconciler', 1, 1, NULL, NULL, NULL);
+
+UPDATE step_attempt SET outcome = 'succeeded' WHERE role = 'reconciler' AND outcome IS NULL;
+
 -- Новый исполнитель слота 1 отработал круг discovery.
 INSERT INTO step_attempt(stage_id, role, campaign_id, round_id, lane_id, lane_assignment_id, outcome)
 VALUES (7, 'reviewer', 1, 1, 2, 5, 'succeeded');
@@ -382,9 +418,19 @@ SELECT l.id FROM review_round rr
 
 -- @step 27 минимум одного мнения: в кампании 2 оно есть
 -- @expect empty
-SELECT 1 AS violation
- WHERE (SELECT COUNT(*) FROM step_attempt a
-         WHERE a.round_id = 3 AND a.role = 'reviewer' AND a.outcome = 'succeeded') = 0;
+SELECT rr.id FROM review_round rr
+ WHERE rr.id = 3 AND rr.kind = 'discovery'
+   AND NOT EXISTS (SELECT 1 FROM step_attempt a
+                    WHERE a.round_id = rr.id AND a.role = 'reviewer'
+                      AND a.outcome = 'succeeded');
+
+-- @step 27a тот же запрос на пустом fix_check нарушения не даёт
+-- @expect empty
+SELECT rr.id FROM review_round rr
+ WHERE rr.id = 2 AND rr.kind = 'discovery'
+   AND NOT EXISTS (SELECT 1 FROM step_attempt a
+                    WHERE a.round_id = rr.id AND a.role = 'reviewer'
+                      AND a.outcome = 'succeeded');
 
 -- @step 28 waiver кампании 2 на слот кампании 1
 -- @expect error FOREIGN KEY
@@ -405,6 +451,16 @@ VALUES (2, 1, 3, 2, 1, 300);
 -- @expect error lane_waiver.campaign_id
 INSERT INTO lane_waiver(campaign_id, round_no, lane_id, human_answer_id, event_id, created_at)
 VALUES (2, 1, 4, 3, 1, 300);
+
+-- @step 31a тем же ответом и заменили линию, и понизили кворум
+-- @expect error already spent
+INSERT INTO lane_assignment(lane_id, generation, profile_id, provider, model, replaces_id, human_answer_id, event_id, assigned_at)
+VALUES (4, 2, 'p-g', 'openai', 'o4', 4, 2, 1, 400);
+
+-- @step 31b и в обратном порядке: ответ уже потрачен на замену
+-- @expect error already spent
+INSERT INTO lane_waiver(campaign_id, round_no, lane_id, human_answer_id, event_id, created_at)
+VALUES (1, 1, 1, 1, 1, 300);
 
 -- @step 32 UPDATE waiver
 -- @expect error immutable
@@ -434,22 +490,26 @@ SELECT l.id FROM review_round rr
                       AND a.role = 'reviewer' AND a.outcome = 'succeeded');
 
 -- @step 35 и потому нужен отдельный запрос: он такой круг ловит
--- @expect rows=1
-SELECT 1 AS violation
- WHERE (SELECT COUNT(*) FROM step_attempt a
-         WHERE a.round_id = 3 AND a.role = 'reviewer' AND a.outcome = 'succeeded') = 0;
+-- @expect rows-json [[3]]
+SELECT rr.id FROM review_round rr
+ WHERE rr.id = 3 AND rr.kind = 'discovery'
+   AND NOT EXISTS (SELECT 1 FROM step_attempt a
+                    WHERE a.round_id = rr.id AND a.role = 'reviewer'
+                      AND a.outcome = 'succeeded');
 
 -- @step 36 foreign_key_check
 -- @expect empty
 PRAGMA foreign_key_check;
 
--- @step 37 инвентарь добавленного: 3 таблицы, 2 индекса, 1 представление, 7 триггеров
--- @expect rows=4
+-- @step 37 объекты модели: 3 таблицы (из них 2 новые), 2 индекса,
+-- 1 представление, 9 триггеров
+-- @expect rows-json [["index", 2], ["table", 3], ["trigger", 9], ["view", 1]]
 SELECT type, COUNT(*) FROM sqlite_master
  WHERE name IN ('review_lane', 'lane_assignment', 'lane_waiver', 'effective_roster',
                 'trg_lane_immutable', 'trg_lane_no_delete',
                 'trg_lane_assignment_chain', 'trg_lane_assignment_immutable',
-                'trg_lane_assignment_no_delete',
+                'trg_lane_assignment_no_delete', 'trg_lane_assignment_answer_xor',
                 'trg_lane_waiver_immutable', 'trg_lane_waiver_no_delete',
+                'trg_lane_waiver_answer_xor',
                 'ux_lane_assignment_id_lane', 'ix_attempt_by_round')
  GROUP BY type ORDER BY type;

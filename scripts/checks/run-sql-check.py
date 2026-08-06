@@ -17,6 +17,11 @@
     error [текст]   обязано быть исключение; текст, если указан, — подстрока
     rows=N          SELECT обязан вернуть ровно N строк
     empty           то же, что rows=0
+    rows-json JSON  SELECT обязан вернуть ровно эти значения, по порядку;
+                    JSON — список списков, например [[0,"p-a",1],[1,"p-e",2]]
+
+`rows=N` проверяет только количество и потому годится там, где значения ничего
+не добавляют; где важно, что именно вернулось, — `rows-json`.
 
 Шаг без `@expect` считается подготовкой данных: он обязан пройти без
 исключения, но в отчёт не попадает. Несовпадение ожидания — FAIL и код
@@ -26,6 +31,7 @@
     python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql
 """
 
+import json
 import sqlite3
 import sys
 
@@ -51,6 +57,8 @@ def parse_expect(rest: str):
         return ("rows", 0)
     if kind.startswith("rows="):
         return ("rows", int(kind[5:]))
+    if kind == "rows-json":
+        return ("rows-json", [tuple(row) for row in json.loads(payload)])
     raise ValueError("непонятная директива @expect: %r" % rest)
 
 
@@ -70,6 +78,12 @@ def check(step: Step, error, rows):
             return "ждали %d строк, получили %s" % (payload, error)
         if len(rows) != payload:
             return "ждали %d строк, получили %d: %s" % (payload, len(rows), rows)
+        return None
+    if kind == "rows-json":
+        if error is not None:
+            return "ждали %s, получили %s" % (payload, error)
+        if rows != payload:
+            return "ждали %s, получили %s" % (payload, rows)
         return None
     return "неизвестный вид ожидания %r" % kind
 
