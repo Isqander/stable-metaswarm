@@ -2085,7 +2085,10 @@ blocker + `branch.state=blocked` + событие», но публичные о�
 после рестарта неоткуда восстановить уже состоявшуюся часть reconciliation — а
 дублировать её в snapshot значит держать два источника правды об одном и том же.
 Recovery различает состояние по признаку «наблюдения записаны, `result` пуст,
-есть открытый blocker `reopen_human_closed`».
+есть открытый `blocker(kind='human_question')`, связанный с
+`human_question(reason='reopen_human_closed')`». Видов блокировок в справочнике
+пять — `human_question`, `awaiting_continue`, `dependency`, `drift`,
+`invalid_graph`, — и причина вопроса живёт не в них, а в `question_reason`.
 
 Snapshot при этом хранит только то, чего нет в обычных таблицах: pending-запросы
 и их контекст. Для `reconcile_failed` наоборот — там нет ни одной валидной
