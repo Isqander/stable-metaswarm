@@ -1,0 +1,9 @@
+# Целевая среда — Linux (WSL2 и VPS), разработка идёт и на Windows.
+# Без этой строки git отдаёт рабочей копии CRLF, и первый же shell-скрипт
+# падает с `bad interpreter: /bin/bash^M`, а python-раннеры теряют shebang.
+* text=auto eol=lf
+
+# Бинарное — не трогать.
+*.png binary
+*.jpg binary
+*.pdf binary
