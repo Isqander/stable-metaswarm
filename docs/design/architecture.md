@@ -660,7 +660,9 @@ answer относится к кампании целиком.
    ├─ каждой линии: задача, ревизия, рубрика. Ledger НЕ передаётся
    ├─ в первом раунде линии слепы и друг к другу
    ├─ disposable read-only checkout на точном SHA
-   ├─ до spawn: TX: attempt + reviewer_exposure по resolved provider/model
+   ├─ до spawn: TX: сначала step_attempt, затем строка допуска
+   │  reviewer_exposure по resolved provider/model — порядок задан FK
+   │  first_attempt_id; при конфликте строка читается и сверяется
    └─ по завершении каждой: TX: observations + attempt.outcome
 
    Одна линия упала, вторая закончила → частичный результат не

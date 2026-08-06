@@ -1,10 +1,12 @@
 # Схема состояния: SQLite
 
 **Инвентарь ниже устарел намеренно.** Числа `61/24/6/6` относятся к шестой
-редакции; после неё в §5.2 и §4 вошла модель effective roster (C-01b свода
-ревью P1-A) — **+2 таблицы, +2 индекса, +1 представление, +9 триггеров**, — а
-остальные schema-effects того же свода (составные FK, триггеры `BEFORE DELETE`,
-ограничение `max_author_revisions`) вносятся одним DDL-заходом следом. Связный
+редакции; после неё вошли модель effective roster (C-01b) — **+2 таблицы,
++2 индекса, +1 представление, +9 триггеров** — и schema-effects C-01a/C-01c и
+C-04: **+1 таблица** (`campaign_transition`), **+1 индекс**, **+2 триггера**.
+Остальные schema-effects того же свода (составные FK по C-06, триггеры
+`BEFORE DELETE` по C-07 и C-08, ограничение `max_author_revisions`) вносятся
+одним DDL-заходом следом. Связный
 прогон DDL и пересчёт inventory выполняются **один раз** после него, чтобы не
 считать одно и то же дважды. Конструкции effective roster при этом уже
 проверены отдельным прогоном на SQLite 3.45: 44 сценария с машинными
@@ -42,7 +44,7 @@ DDL. Документ отвечает на вопрос, на который р
 | Порядок работ | `task-plans.md` |
 
 В конце — §14: список мест, где проектирование **уточнило или дополнило**
-решение. Читать обязательно: там двадцать три уточнения с обоснованием, включая
+решение. Читать обязательно: там двадцать пять уточнений с обоснованием, включая
 одну необязательную возможность.
 
 ---
@@ -372,6 +374,10 @@ CREATE TABLE step_attempt (
              AND lane_id IS NULL AND lane_assignment_id IS NULL))
 );
 
+-- Под scope-FK из reviewer_exposure: первая попытка допуска принадлежит той
+-- же кампании, что и сама строка допуска.
+CREATE UNIQUE INDEX ux_attempt_id_campaign ON step_attempt (id, campaign_id);
+
 -- Инвариант 19: не более одной активной попытки на шаг или линию.
 CREATE UNIQUE INDEX ux_attempt_active
   ON step_attempt (stage_id, role, COALESCE(lane_id, -1))
@@ -475,6 +481,7 @@ CREATE TABLE review_subject (
   revision          TEXT    NOT NULL,
   parent_subject_id INTEGER REFERENCES review_subject(id),
   created_at        INTEGER NOT NULL,
+  UNIQUE (id, revision),                 -- под scope-FK из reviewer_exposure
   CHECK (parent_subject_id IS NULL OR parent_subject_id <> id)
 );
 
@@ -519,11 +526,39 @@ CREATE TABLE review_campaign (
   close_reason       TEXT,
   UNIQUE (stage_id, ordinal),
   UNIQUE (stage_id, id),                           -- под scope-FK из step_attempt
+  UNIQUE (id, subject_id),                         -- под scope-FK из exposure
   CHECK (
     (state IN ('closed_clean', 'closed_escalated', 'closed_cancelled'))
     = (closed_at IS NOT NULL)
   )
 );
+
+-- Допустимые переходы кампании — данные, а не комментарий. Таблица закрыта:
+-- у трёх терминальных состояний исходящих строк нет.
+CREATE TABLE campaign_transition (
+  from_state TEXT NOT NULL REFERENCES campaign_state(state),
+  to_state   TEXT NOT NULL REFERENCES campaign_state(state),
+  PRIMARY KEY (from_state, to_state)
+);
+
+CREATE TRIGGER trg_campaign_state_transition
+BEFORE UPDATE OF state ON review_campaign
+BEGIN
+  SELECT RAISE(ABORT, 'illegal campaign state transition')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM campaign_transition t
+     WHERE t.from_state = OLD.state AND t.to_state = NEW.state
+  );
+END;
+
+-- Кампания рождается только в discovery: остальные состояния достижимы
+-- переходами, и обойти их прямой вставкой нельзя.
+CREATE TRIGGER trg_campaign_initial_state
+BEFORE INSERT ON review_campaign
+WHEN NEW.state <> 'discovery'
+BEGIN
+  SELECT RAISE(ABORT, 'campaign is created in discovery');
+END;
 
 -- Слот кворума: позиция, а не исполнитель. Создаётся при открытии кампании
 -- и дальше не меняется. Размер кворума = число слотов кампании.
@@ -837,6 +872,57 @@ gate не пройдёт. Записанный waiver стал бы durable no-o
 кворума (она не снимает с него findings, поэтому круг всё равно не закроется) и
 остановка ветки — узкое место, вынесенное вопросом **Q57** в
 [open-questions.md](../requirements/open-questions.md).
+
+**Почему машина состояний кампании живёт в базе, а не только в T1.4.** Ревью
+P1-A нашло разрыв (C-01a): переход `discovery → reconciliation` был назван, но
+не имел исполняющей операции, и у реализации оставалось два пути — получить
+`InvalidCampaignTransition` либо сделать прямой `UPDATE` в обход единственной
+state machine. Второй путь молча делает состояние `reconciliation`
+недостижимым, а recovery перестаёт отличать «ждём вторую линию» от «ждём
+reconciliation». Справочник переходов закрывает именно его: `discovery →
+fix_cycle` физически не вставляется, а у терминальных состояний исходящих строк
+нет, и это ровно `INV-11` плана T1.4, снятый с кода на базу.
+
+Домен при этом никуда не девается: база проверяет **допустимость пары**, а
+какое событие соответствует переходу (`discovery_completed`,
+`reconciliation_clean`, `human_finalized`) решает T1.4 — в паре `fix_cycle →
+fix_cycle` их вообще три.
+
+Цена названа честно: фикстура «кампания сразу в `fix_cycle`» больше не
+создаётся одной вставкой, builders обязаны пройти легальный путь. Для тестов
+это и нужно — путь, которым состояние достигается в проде, а не тот, которым
+удобно его подделать.
+
+**Открытие кампании — одна транзакция, и её незавершённость видна запросом.**
+`architecture.md` §7.1 требует создать вместе предмет, кампанию, snapshot
+порога, слоты с первыми назначениями, круг 1 и событие. Атомарность держит
+`store.transaction()`, а идемпотентность при повторе после падения —
+`UNIQUE (stage_id, ordinal)`: вторая попытка открыть ту же кампанию стадии
+отвергается базой, а не проверкой в коде. Но частично открытую кампанию база
+запретить не может — родитель не знает о будущих детях, — поэтому recovery
+audit гоняет отдельный запрос:
+
+```sql
+-- Незавершённое открытие: кампания без слотов, без круга 1 либо со слотом
+-- без исполнителя. Должен вернуть 0 строк.
+SELECT c.id
+  FROM review_campaign c
+ WHERE c.closed_at IS NULL
+   AND (NOT EXISTS (SELECT 1 FROM review_lane l WHERE l.campaign_id = c.id)
+        OR NOT EXISTS (SELECT 1 FROM review_round r
+                        WHERE r.campaign_id = c.id
+                          AND r.round_no = 1 AND r.kind = 'discovery')
+        OR EXISTS (SELECT 1 FROM review_lane l
+                    WHERE l.campaign_id = c.id
+                      AND NOT EXISTS (SELECT 1 FROM lane_assignment a
+                                       WHERE a.lane_id = l.id)));
+```
+
+Третье условие — не паранойя: слот и его первый исполнитель пишутся разными
+INSERT'ами, и кампания со слотами без назначений выглядит открытой, а кворум у
+неё пустой. `effective_roster` такую кампанию покажет короче, чем она есть, и
+гейт участия линий не заметит разницы — он ходит по слотам, а не по
+назначениям.
 
 `severity_threshold` и `policy_version` копируются на кампанию при её создании,
 а не читаются из конфига в момент решения. Причина в §6.3 `decision.md`: в
@@ -1648,17 +1734,25 @@ Override не закрывает период (`decision.md` §6.3), дальш�
 здесь.
 
 ```sql
+-- Строка = факт допуска пары провайдер+модель к этой версии предмета в этой
+-- кампании (Q50 A). Журнал попыток живёт в step_attempt и здесь не дублируется.
 CREATE TABLE reviewer_exposure (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id      INTEGER NOT NULL REFERENCES run(id),
-  subject_id  INTEGER NOT NULL REFERENCES review_subject(id),
-  revision    TEXT    NOT NULL,
-  provider    TEXT    NOT NULL,
-  model       TEXT    NOT NULL,
-  campaign_id INTEGER NOT NULL REFERENCES review_campaign(id),
-  attempt_id  INTEGER NOT NULL REFERENCES step_attempt(id),
-  created_at  INTEGER NOT NULL,
-  UNIQUE (subject_id, revision, provider, model, campaign_id)
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id           INTEGER NOT NULL REFERENCES run(id),
+  subject_id       INTEGER NOT NULL REFERENCES review_subject(id),
+  revision         TEXT    NOT NULL,
+  provider         TEXT    NOT NULL,
+  model            TEXT    NOT NULL,
+  campaign_id      INTEGER NOT NULL REFERENCES review_campaign(id),
+  first_attempt_id INTEGER NOT NULL REFERENCES step_attempt(id),
+  created_at       INTEGER NOT NULL,
+  UNIQUE (subject_id, revision, provider, model, campaign_id),
+  -- Кампания смотрит на тот же предмет, ревизия принадлежит этому предмету,
+  -- а первая попытка — этой кампании. Иначе строка допуска говорит про одно,
+  -- а ссылается на другое.
+  FOREIGN KEY (campaign_id, subject_id)      REFERENCES review_campaign(id, subject_id),
+  FOREIGN KEY (subject_id, revision)         REFERENCES review_subject(id, revision),
+  FOREIGN KEY (first_attempt_id, campaign_id) REFERENCES step_attempt(id, campaign_id)
 );
 
 CREATE INDEX ix_exposure_lookup ON reviewer_exposure (subject_id, revision, provider, model);
@@ -1680,6 +1774,45 @@ CREATE INDEX ix_exposure_subject ON reviewer_exposure (subject_id, provider, mod
 превращается в способ обойти правило свежести — достаточно один раз ответить
 мусором. Поэтому строка пишется в той же транзакции, что и создание попытки, до
 `spawn`.
+
+**Строка — факт допуска, а не журнал попыток** (решение Q50 A). Различие не
+терминологическое: ревью P1-A показало, что при журнальном чтении `UNIQUE`
+ломается на двух штатных путях. Первый — reconciler: `agent-contracts.md` §4.3
+по умолчанию даёт ему профиль линии с наименьшим индексом, то есть ту же пару
+provider+model на той же ревизии и в той же кампании. Второй — retry после
+`contract_error`, где смысл правила как раз требует, чтобы строка осталась
+одна. С membership-семантикой оба пути штатные: строка одна,
+`first_attempt_id` указывает на **первую** передачу, а кто ещё работал под этой
+парой — видно в `step_attempt`.
+
+Отсюда именованная операция `reserve_reviewer_exposure()` и жёсткий порядок
+внутри её транзакции, заданный внешним ключом `first_attempt_id →
+step_attempt(id)`:
+
+1. проверить допуск — свежесть пары и запрет пары автора ревизии;
+2. создать `step_attempt`;
+3. вставить membership либо, при конфликте, **прочитать и сверить**
+   существующую строку.
+
+Обратный порядок физически невозможен: membership не на что ссылаться. Шаг 3
+именно сверяет, а не глотает конфликт: безусловный `INSERT OR IGNORE` запрещён,
+потому что маскирует ошибку вызывающего — попытку допустить пару, которой в
+этой кампании быть не должно. Разрешённых продолжений ровно два: retry той же
+логической попытки и новая сессия сводящего агента с той же парой.
+
+Из membership-семантики следует и формулировка инварианта в T1.3: не «вторая
+запись отвергается», а **«дубля не появляется»**. `UNIQUE` не запрещает
+планировщику назначить уже видевшую пару — он лишь не даёт создать вторую
+строку допуска; свежесть проверяется при назначении линии или кампании, а не
+перед каждым запуском.
+
+**Что membership не закрывает.** Строка появляется только вместе с первой
+попыткой, поэтому между открытием кампании (линии уже отобраны) и `spawn`
+допуск нигде не зафиксирован. Пока кампании одной стадии открываются
+последовательно по `ordinal`, это безопасно: второй кворум отбирается уже после
+того, как первый отспавнил линии. Появится параллельное открытие — допуск
+придётся резервировать раньше попытки, то есть делать `first_attempt_id`
+дозаписываемым. Пишу это здесь, чтобы ограничение было видно до, а не после.
 
 Отсюда следует, что фактическая пара обязана быть **известна заранее**, а не
 получена из ответа. Она резолвится один раз при старте прогона (проверкой
@@ -2208,10 +2341,10 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 9 | `escalation_severity` монотонна вверх | **База** | Вычисляется `MAX(rank)` по периоду; понизить нечего |
 | 10 | Исход ревьюера совместим с disposition | **База** | CHECK в `finding_round` — **с явной проверкой `disposition IS NOT NULL`**, иначе NULL проходит |
 | 11 | Решение выносит владелец круга, оно единственное | **База + код** | Одна колонка `reviewer_decision`; запрос §5.2 проверяет роль, stage, outcome и `lane_id = owner_lane_id`; у `post_check` решения быть не может по CHECK |
-| 12 | Новая кампания не получает прежнюю сессию | **База + код** | `reviewer_exposure` + отбор линий по свободным парам provider+model; замена исполнителя слота проходит тот же отбор |
+| 12 | Новая кампания не получает прежнюю сессию | **База + код** | `reviewer_exposure` как факт допуска (`UNIQUE` не даёт появиться дублю) + отбор линий по свободным парам provider+model; замена исполнителя слота проходит тот же отбор |
 | 13 | У каждого закрытия записан `resolution_authority`; reopen следует ему | **База + код** | FK на `resolution_kind` + CHECK с `ELSE` выводят authority из resolution; маршрутизация reopen — код |
 | 14 | Переход и событие — одна транзакция | **Код** | Единственный writer, `store.transaction()` пишет событие вместе с переходом |
-| 15 | Все переходы §6.6 атомарны целиком | **Код** | Шесть именованных транзакционных операций; branch-scoped вопрос включает blocker с обеими ссылками и `branch.state='blocked'` |
+| 15 | Все переходы §6.6 атомарны целиком | **Код** | Восемь именованных транзакционных операций (§11); branch-scoped вопрос включает blocker с обеими ссылками и `branch.state='blocked'`. Допустимость самих переходов кампании при этом держит **база**: справочник `campaign_transition` + триггер |
 | 16 | Ответ записан до снятия блокировки | **Код** | Ответ, clear `human_question` и новый `awaiting_continue` пишутся одной TX; ветка остаётся `blocked` |
 | 17 | После перезапуска нет двойного перехода и двойной работы | **Код** | Recovery audit: `outcome IS NULL` → `interrupted`; новая попытка после подтверждения смерти pgid |
 | 18 | Один экземпляр сервиса на каталог | **ОС** | `flock` на файле + lease с heartbeat |
@@ -2261,7 +2394,10 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 
 ## 11. Что реализуется транзакцией
 
-Шесть переходов из `decision.md` §6.6 в терминах таблиц.
+Шесть переходов из `decision.md` §6.6 в терминах таблиц плюс два, которых там
+не было: открытие кампании и завершение слепой фазы. Оба назвало ревью P1-A
+(C-01a и C-01c) — они существовали в тексте `architecture.md` §7.1, но не имели
+ни операции, ни границы транзакции, и потому расползались по вызовам.
 
 | Переход | Таблицы в одной транзакции |
 |---|---|
@@ -2269,6 +2405,8 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | Получен ответ | `telegram_inbox.handled_at` + `human_answer` + `blocker(human_question).cleared_at` + новый `blocker(awaiting_continue, branch_id)` + сохранённый `branch.state='blocked'` + review-следствие (`stage_execution.max_author_revisions += 1` при дополнительной правке; `review_campaign.state='closed_escalated'` при окончательном ответе; `lane_assignment` нового поколения либо `lane_waiver` при ответе на `lane_failure`) + `run_event` |
 | Задача выполнена | `step_attempt.outcome` + `task.state='done'` + пересчёт готовности зависимых + `run_event` |
 | Круг ревью закрыт | Все `finding_round` круга + `review_round.result` + `finding_resolution` по закрытым + состояние кампании (`closed_clean` при успехе; прежний `fix_cycle` при `escalated` до ответа человека) + `run_event` |
+| Кампания открыта | `review_subject` (или существующий) + `review_campaign(state='discovery')` со snapshot порога + слоты `review_lane` + первые `lane_assignment` + `review_round(1, discovery)` + `run_event` |
+| Слепая фаза завершена | `review_campaign.state='reconciliation'` + `run_event(discovery_completed)`; коммит **до** spawn reconciler, иначе после падения recovery всё ещё видит `discovery` |
 | Импорт графа | `task_graph_import` + `task` + `task_dependency` + инвалидация задач прежней ревизии + `run_event` |
 | Эскалация | `review_round.result='escalated'` + `human_question(snapshot_json)` + `notification_outbox` + `blocker(branch_id, question_id)` + `branch.state='blocked'` + сохранённый `review_campaign.state='fix_cycle'` + `run_event` |
 
@@ -2289,6 +2427,13 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 иначе между принятым ответом и применённым действием существует момент, когда
 блокировка уже снята, а состав линий ещё прежний, — и `continue` уводит кампанию
 дальше с ним.
+
+Ещё одна операция границы транзакции не образует, но порядок внутри неё
+обязателен: перед каждым `spawn` пишутся `step_attempt` и строка допуска
+`reviewer_exposure` — именно в этом порядке, потому что `first_attempt_id`
+ссылается на попытку (§5.7). Отдельная транзакция здесь и нужна: попытка должна
+быть durable до запуска процесса, иначе после падения некому сопоставить
+осиротевший процесс с записью.
 
 Повтор доставки того же ответа отсекается на входе (`UNIQUE (question_id)` в
 `human_answer`, PK в `telegram_inbox`). Внутри review-домена один ответ даёт
@@ -2335,6 +2480,22 @@ INSERT INTO run_terminal_state(state) VALUES
 INSERT INTO campaign_state(state) VALUES
   ('discovery'),('reconciliation'),('fix_cycle'),('closed_clean'),
   ('closed_escalated'),('closed_cancelled');
+
+-- Таблица переходов T1.4 целиком. Начальная вставка `[*] → discovery`
+-- переходом не является и строки не имеет; у терминальных состояний
+-- исходящих строк нет, поэтому они терминальны по построению.
+INSERT INTO campaign_transition(from_state, to_state) VALUES
+  ('discovery',      'reconciliation'),    -- discovery_completed
+  ('discovery',      'closed_cancelled'),
+  ('reconciliation', 'fix_cycle'),         -- reconciliation_has_findings
+  ('reconciliation', 'closed_clean'),      -- reconciliation_clean
+  ('reconciliation', 'closed_cancelled'),
+  ('fix_cycle',      'fix_cycle'),         -- check_needs_revision,
+                                           -- human_gate_opened,
+                                           -- human_extra_revision
+  ('fix_cycle',      'closed_clean'),      -- check_clean
+  ('fix_cycle',      'closed_escalated'),  -- human_finalized
+  ('fix_cycle',      'closed_cancelled');
 
 INSERT INTO task_state(state) VALUES
   ('pending'),('ready'),('running'),('done'),('invalidated'),('cancelled');
@@ -2410,7 +2571,7 @@ INSERT INTO verification_status(status) VALUES ('green'),('red'),('error');
 
 ## 14. Уточнения к `decision.md`
 
-Проектирование и последующее ревью таск-планов обнаружили двадцать два места,
+Проектирование и последующее ревью таск-планов обнаружили двадцать четыре места,
 где решение чего-то не учло, и одну возможность (пункт 5). Ни одно из принятых
 решений не отменяется — но без этих уточнений часть из них нереализуема.
 
@@ -2716,6 +2877,35 @@ production-форматирование. Formatter получает готово
 решения по findings свежему агенту, а §6.3 `decision.md` обосновывает владение
 именно памятью прежнего. Это контракт разрешения findings, поэтому вынесено
 вопросом Q57, а не решено проектированием.
+
+**24. Машина состояний кампании и две её операции.** §6.6 `decision.md`
+перечисляет переходы, но открытие кампании и завершение слепой фазы в список не
+попали, а сама допустимость переходов держалась только тем, что весь код ходит
+через один домен. Ревью P1-A (C-01a, C-01c) показало цену: у перехода
+`discovery → reconciliation` не было исполняющей операции, и прямой `UPDATE` в
+обход домена делал состояние `reconciliation` недостижимым, а recovery терял
+разницу между «ждём вторую линию» и «ждём reconciliation».
+
+Добавлены (§5.2 и §11): справочник `campaign_transition` с триггером — база
+отвергает `discovery → fix_cycle` и любой исход из терминального состояния;
+триггер начального состояния — кампания рождается только в `discovery`; две
+именованные транзакции — «Кампания открыта» и «Слепая фаза завершена», причём
+вторая обязана быть закоммичена **до** spawn reconciler. Частично открытую
+кампанию база запретить не может, поэтому recovery audit получил запрос
+незавершённого открытия: кампания без слотов, без круга 1 либо со слотом без
+исполнителя.
+
+**25. `reviewer_exposure` — членство, а не журнал.** Прежняя формулировка
+требовала строку на каждую передачу входа и одновременно держала
+`UNIQUE (subject_id, revision, provider, model, campaign_id)`. Вместе они
+ломаются на двух штатных путях (C-04): reconciler по умолчанию наследует
+профиль линии с наименьшим индексом, а retry после `contract_error` повторяет
+ту же пару. Решение Q50 A: строка означает допуск пары к версии предмета в
+кампании, первая передача записана в `first_attempt_id` (переименовано из
+`attempt_id`), журнал попыток остаётся в `step_attempt`. Добавлены три составных
+FK, связывающих строку допуска с предметом кампании, ревизией предмета и
+попыткой той же кампании; запись выполняет `reserve_reviewer_exposure()`, а
+безусловный `INSERT OR IGNORE` запрещён.
 
 ### Что было неверно в первой редакции этого документа
 
