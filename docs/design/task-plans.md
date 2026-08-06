@@ -367,12 +367,13 @@ rollback не оставляет identity, а committed allocator не пере�
 опубликованный INTEGER ID.
 Строки `issued` проходят строгий гейт author revision/owner decision, новый
 finding получает `post_check` без фиктивных ответов и не блокирует закрытие
-текущего круга. Перед result в discovery и fix-check пусты все три гейта:
-unlinked observations, отсутствующее участие открытого finding и incomplete
-`issued`. Human gate одной транзакцией создаёт branch-scoped blocker и
-переводит ветку в `blocked`, поэтому Run без активного соседа показывает
-`waiting_human`; вопрос форматирует чистый порт только после единственного
-`AskHuman`, а не заранее у вызывающего.
+текущего круга. Перед result в discovery и fix-check пусты все четыре гейта:
+unlinked observations, отсутствующее участие открытого finding, incomplete
+`issued` и слот кворума без успешной попытки ревьюера этого круга либо
+`lane_waiver` на него. Human gate одной транзакцией создаёт branch-scoped
+blocker и переводит ветку в `blocked`, поэтому Run без активного соседа
+показывает `waiting_human`; вопрос форматирует чистый порт только после
+единственного `AskHuman`, а не заранее у вызывающего.
 Follow-up observation и `recurrence` либо появляются вместе с решением, либо вся
 транзакция откатывается; перед каждым `review_round.result` глобальный запрос
 observations без link пуст. Отдельные негативные фикстуры доказывают, что

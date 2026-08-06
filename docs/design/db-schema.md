@@ -1,5 +1,18 @@
 # Схема состояния: SQLite
 
+**Инвентарь ниже устарел намеренно.** Числа `61/24/6/6` относятся к шестой
+редакции; после неё в §5.2 и §4 вошла модель effective roster (C-01b свода
+ревью P1-A) — **+2 таблицы, +2 индекса, +1 представление, +2 триггера**, — а
+остальные schema-effects того же свода (составные FK, триггеры `BEFORE DELETE`,
+ограничение `max_author_revisions`) вносятся одним DDL-заходом следом. Связный
+прогон DDL и пересчёт inventory выполняются **один раз** после него, чтобы не
+считать одно и то же дважды. Конструкции effective roster при этом уже
+проверены отдельным прогоном на SQLite 3.45: 22 сценария, включая контрпример
+«одна линия вернула `[]`, вторая не завершилась», замену исполнителя, повтор
+замены после падения и запрет параллельной работы двух поколений слота.
+Сценарий воспроизводится: `python3 scripts/checks/run-sql-check.py
+scripts/checks/roster-model.sql`.
+
 Дата: 2026-08-05. Статус: шестая редакция после ревью T1.7b. Связная DDL из
 документа исполнена целиком в SQLite in-memory: 61 таблица, 24 индекса,
 6 представлений и 6 триггеров; `PRAGMA foreign_key_check` чист. Отдельными
@@ -27,8 +40,8 @@ DDL. Документ отвечает на вопрос, на который р
 | Порядок работ | `task-plans.md` |
 
 В конце — §14: список мест, где проектирование **уточнило или дополнило**
-решение. Читать обязательно: там двадцать два уточнения с обоснованием, включая одну
-необязательную возможность.
+решение. Читать обязательно: там двадцать три уточнения с обоснованием, включая
+одну необязательную возможность.
 
 ---
 
@@ -181,7 +194,8 @@ SQLite не умеет запрещать UPDATE декларативно. Не�
 прогон           run, branch, stage_execution, step_attempt, attempt_liveness,
                  logical_session, run_event, blocker
 граф             task, task_dependency, task_graph_import
-review-домен     review_subject, review_campaign, review_lane, review_round,
+review-домен     review_subject, review_campaign, review_lane, lane_assignment,
+                 lane_waiver, review_round,
                  author_revision, review_observation, finding,
                  finding_observation_link, finding_round, finding_resolution,
                  severity_override, reviewer_exposure, run_profile_resolution
@@ -309,7 +323,9 @@ CREATE TABLE step_attempt (
   stage_id           INTEGER NOT NULL REFERENCES stage_execution(id),
   role               TEXT    NOT NULL REFERENCES attempt_role(role),
                                                         -- author | reviewer | planner | reconciler
-  lane_id            INTEGER REFERENCES review_lane(id),
+  round_id           INTEGER REFERENCES review_round(id),
+  lane_id            INTEGER REFERENCES review_lane(id),          -- слот
+  lane_assignment_id INTEGER REFERENCES lane_assignment(id),      -- исполнитель
   session_id         INTEGER REFERENCES logical_session(id),
   -- вход: неизменяем
   profile_id         TEXT    NOT NULL,
@@ -329,7 +345,14 @@ CREATE TABLE step_attempt (
   output_sha         TEXT,
   finished_at        INTEGER,
   transcript_path    TEXT,
-  transcript_digest  TEXT
+  transcript_digest  TEXT,
+  -- Слот и исполнитель не могут разойтись: поколение обязано принадлежать
+  -- именно тому слоту, который записан в строке.
+  FOREIGN KEY (lane_assignment_id, lane_id) REFERENCES lane_assignment(id, lane_id),
+  CHECK ((lane_id IS NULL) = (lane_assignment_id IS NULL)),
+  -- Попытка ревьюера и reconciler'а принадлежит конкретному кругу: без этого
+  -- полноту roster круга доказать нечем.
+  CHECK (role NOT IN ('reviewer', 'reconciler') OR round_id IS NOT NULL)
 );
 
 -- Инвариант 19: не более одной активной попытки на шаг или линию.
@@ -341,6 +364,17 @@ CREATE UNIQUE INDEX ux_attempt_active
 Partial unique index — тот случай, где SQLite делает работу за нас: пока
 `outcome IS NULL`, вторая попытка той же роли в той же стадии физически не
 вставляется. Инвариант перестаёт быть проверкой в сервисе.
+
+Индекс построен по **слоту**, а не по поколению исполнителя, и это осмысленный
+выбор: две активные попытки одного слота — разных поколений — означали бы, что
+заменённая линия всё ещё работает параллельно с заменившей. С `lane_id` в ключе
+такая пара не вставляется, а составной FK не даёт записать чужое поколение под
+чужим слотом.
+
+`round_id` — та связь, без которой roster-гейт §5.2 невыразим: у попытки есть
+`stage_id`, но на одной стадии живут несколько кампаний, а в кампании несколько
+кругов. Авторская попытка круга не имеет — правка стоит **между** кругами, и её
+место в цепочке задаёт `review_round.preceding_revision_id`.
 
 `actual_model` заполняется при завершении, потому что до запуска он неизвестен:
 у `claude-z` запрос `opus` возвращает `glm-5.2`. Правило свежести ревьюера
@@ -376,7 +410,7 @@ CREATE TABLE logical_session (
   provider          TEXT    NOT NULL,
   model             TEXT    NOT NULL,
   vendor_session_id TEXT,
-  purpose           TEXT    NOT NULL,       -- lane:12 | author:stage:7
+  purpose           TEXT    NOT NULL,       -- assignment:12 | author:stage:7
   created_at        INTEGER NOT NULL,
   closed_at         INTEGER
 );
@@ -450,17 +484,188 @@ CREATE TABLE review_campaign (
   )
 );
 
+-- Слот кворума: позиция, а не исполнитель. Создаётся при открытии кампании
+-- и дальше не меняется. Размер кворума = число слотов кампании.
 CREATE TABLE review_lane (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES review_campaign(id),
   lane_index  INTEGER NOT NULL,                     -- 0,1,… минимальный = владелец
-  profile_id  TEXT    NOT NULL,
-  provider    TEXT    NOT NULL,
-  model       TEXT    NOT NULL,
-  session_id  INTEGER REFERENCES logical_session(id),
   UNIQUE (campaign_id, lane_index)
 );
+
+-- Кто исполняет слот. Замена линии человеком — новое поколение, а не UPDATE
+-- прежнего: append-only, поэтому прежний исполнитель и его попытки остаются
+-- в аудите.
+CREATE TABLE lane_assignment (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  lane_id         INTEGER NOT NULL REFERENCES review_lane(id),
+  generation      INTEGER NOT NULL,                 -- 1,2,… внутри слота
+  profile_id      TEXT    NOT NULL,
+  provider        TEXT    NOT NULL,
+  model           TEXT    NOT NULL,
+  replaces_id     INTEGER UNIQUE REFERENCES lane_assignment(id),
+  session_id      INTEGER REFERENCES logical_session(id),
+  human_answer_id INTEGER REFERENCES human_answer(id),  -- чем разрешена замена
+  event_id        INTEGER NOT NULL REFERENCES run_event(id),
+  assigned_at     INTEGER NOT NULL,
+  UNIQUE (lane_id, generation),
+  -- Первое назначение никого не заменяет и не требует ответа человека;
+  -- любое последующее — и то, и другое.
+  CHECK ((generation = 1) = (replaces_id IS NULL)),
+  CHECK ((generation = 1) = (human_answer_id IS NULL))
+);
+
+-- Для составного FK из step_attempt: попытка ссылается и на поколение,
+-- и на слот, и разойтись они не могут.
+CREATE UNIQUE INDEX ux_lane_assignment_id_lane ON lane_assignment (id, lane_id);
+
+-- Поколение продолжает цепочку того же слота и ровно предыдущее звено.
+-- Без этого generation 3 мог бы сослаться на 1, оставив 2 без преемника —
+-- то есть два активных исполнителя одного слота.
+CREATE TRIGGER trg_lane_assignment_chain
+BEFORE INSERT ON lane_assignment
+WHEN NEW.replaces_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'replaces_id must be previous generation of same lane')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM lane_assignment p
+     WHERE p.id = NEW.replaces_id
+       AND p.lane_id = NEW.lane_id
+       AND p.generation = NEW.generation - 1
+  );
+END;
+
+-- Назначение неизменяемо. Единственная дозапись — привязка логической
+-- сессии, и только один раз: NULL → значение.
+CREATE TRIGGER trg_lane_assignment_immutable
+BEFORE UPDATE ON lane_assignment
+WHEN NEW.lane_id         <> OLD.lane_id
+  OR NEW.generation      <> OLD.generation
+  OR NEW.profile_id      <> OLD.profile_id
+  OR NEW.provider        <> OLD.provider
+  OR NEW.model           <> OLD.model
+  OR NEW.assigned_at     <> OLD.assigned_at
+  OR NEW.event_id        <> OLD.event_id
+  OR NEW.replaces_id     IS NOT OLD.replaces_id
+  OR NEW.human_answer_id IS NOT OLD.human_answer_id
+  OR OLD.session_id      IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'lane_assignment is immutable except session binding');
+END;
+
+-- Разрешение человека закрыть круг без этой линии: деградированный кворум
+-- (`architecture.md` §7.1.1). Строка привязана к кругу и к ответу.
+CREATE TABLE lane_waiver (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id     INTEGER NOT NULL REFERENCES review_campaign(id),
+  round_no        INTEGER NOT NULL,
+  lane_id         INTEGER NOT NULL REFERENCES review_lane(id),
+  human_answer_id INTEGER NOT NULL REFERENCES human_answer(id),
+  event_id        INTEGER NOT NULL REFERENCES run_event(id),
+  created_at      INTEGER NOT NULL,
+  UNIQUE (campaign_id, round_no, lane_id),
+  FOREIGN KEY (campaign_id, round_no) REFERENCES review_round(campaign_id, round_no)
+);
+
+-- Effective roster: слоты кампании с текущим исполнителем. Активное
+-- назначение — то, которое никто не заменил.
+CREATE VIEW effective_roster AS
+SELECT l.campaign_id, l.id AS lane_id, l.lane_index,
+       a.id AS assignment_id, a.generation,
+       a.profile_id, a.provider, a.model
+  FROM review_lane l
+  JOIN lane_assignment a ON a.lane_id = l.id
+ WHERE NOT EXISTS (SELECT 1 FROM lane_assignment s WHERE s.replaces_id = a.id);
 ```
+
+**Почему слот отделён от исполнителя.** Кворум — заявленное число независимых
+мнений, и §7.1.1 `architecture.md` прямо разрешает человеку **заменить**
+исчерпавшую бюджет линию другим профилем, не понижая кворум. В одной таблице
+это невыразимо: `UNIQUE (campaign_id, lane_index)` держит слот занятым, так что
+заменяющая строка либо конфликтует по индексу, либо получает следующий индекс —
+и тогда roster растёт, а правило «минимальный `lane_index` = владелец» начинает
+означать не то, что означало. Разделение снимает обе беды разом: слоты создаются
+один раз при открытии кампании, `COUNT(*)` по ним и есть кворум, а замена — это
+запись в другой таблице.
+
+**Почему append-only, а не колонка `retired_at`.** Требование «обычные
+`UPDATE`/`DELETE` прежнего назначения запрещены» выражается прямо: триггер
+неизменяемости, и активное назначение определяется отсутствием преемника, а не
+изменяемым флагом. Линейность цепочки держит пара «`UNIQUE (lane_id,
+generation)` + триггер `trg_lane_assignment_chain`»: преемник обязан быть
+следующим поколением того же слота, а номер поколения в слоте занят
+однократно — значит в слоте ровно одно назначение без преемника, то самое,
+которое видит `effective_roster`. `UNIQUE (replaces_id)` при такой паре
+срабатывать уже не на чем; он оставлен ради индекса под антиджойн
+представления и как вторая линия защиты, если триггер когда-нибудь снимут.
+Побочная выгода: повторный вызов замены после падения не создаёт третье
+поколение, он падает на уникальности, и recovery видит уже применённый
+результат.
+
+**Владение — на слот, исполнение — на поколение.** `review_observation.lane_id`,
+`finding_round.owner_lane_id` и `finding.first_owner_lane_id` ссылаются на
+`review_lane`, то есть на слот; `step_attempt` — на конкретное поколение (и на
+слот составным FK, см. §4). Иначе замена владельца молча обнуляла бы владение:
+гейт §5.2 сравнивает `a.lane_id = fr.owner_lane_id`, и после замены попытка
+нового исполнителя перестала бы совпадать с владельцем finding'а. При таком
+разделении запрос остаётся дословно тем же, а «владелец» продолжает означать
+позицию в кворуме, а не конкретную модель.
+
+**Полнота roster — гейт, а не следствие.** Валидный пустой результат `[]`
+законен, поэтому «линия отработала и ничего не нашла» и «линия не отработала»
+неразличимы по наблюдениям — только по попыткам. Отсюда четвёртый гейт круга,
+рядом с двумя запросами §5.2 ниже и глобальным запросом unlinked observations
+§5.4:
+
+```sql
+-- Должен вернуть 0 строк перед любым review_round.result и перед spawn
+-- reconciler: у каждого слота либо успешная попытка ревьюера в этом круге,
+-- либо durable waiver человека на этот круг.
+SELECT l.id AS lane_id
+  FROM review_lane l
+ WHERE l.campaign_id = :campaign_id
+   AND NOT EXISTS (
+         SELECT 1 FROM lane_waiver w
+          WHERE w.campaign_id = :campaign_id
+            AND w.round_no    = :round_no
+            AND w.lane_id     = l.id)
+   AND NOT EXISTS (
+         SELECT 1 FROM step_attempt a
+          WHERE a.round_id = :round_id
+            AND a.lane_id  = l.id
+            AND a.role     = 'reviewer'
+            AND a.outcome  = 'succeeded');
+```
+
+Контрпример, ради которого гейт написан: первая линия вернула `[]` и завершилась
+успехом, вторая не завершилась вовсе. Три прежних гейта пусты — unlinked
+observations нет, findings нет, `issued`-строк нет, — и `apply_reconciliation()`
+записал бы результат круга по мнению одной линии. С этим запросом слот второй
+линии возвращается строкой, и результат не пишется.
+
+**Деградация кворума — строка, а не флаг на кампании.** Человек разрешает её на
+конкретный круг: линия может не отработать в круге 2 и вернуться в круге 3.
+Поэтому `lane_waiver` ключуется `(campaign_id, round_no, lane_id)` и несёт
+ссылку на ответ человека — при разборе «почему это ревью ничего не нашло» видно
+не только число фактически отработавших линий, но и чьим решением оно понижено.
+
+**Две именованные операции, обе транзакционные:**
+
+- `replace_lane_assignment(lane_id, profile_id, human_answer_id)` — новое
+  поколение + событие. Предусловия: кампания не закрыта; у слота нет активной
+  попытки (`outcome IS NULL`); слот ещё не отработал текущий круг успешной
+  попыткой ревьюера; новый профиль проходит те же проверки, что и при наборе
+  линий, — свежесть по `reviewer_exposure` и запрет пары автора ревизии.
+- `waive_lane_for_round(campaign_id, round_no, lane_id, human_answer_id)` —
+  строка `lane_waiver` + событие. Предусловие: ответ человека на вопрос
+  `lane_failure` с вариантом «продолжить деградированным кворумом».
+
+Структурно замена допустима в любой фазе, и это не оговорка, а следствие
+разделения: владелец — слот, поэтому новый исполнитель законно выносит решения
+по findings прежнего. **P1-A реализует и проверяет только замену в
+`discovery` до `discovery_completed`**; замена внутри `fix_check` остаётся
+границей пакета — схема её выдерживает, операция та же, но приёмочного сценария
+на неё в P1-A нет.
 
 `severity_threshold` и `policy_version` копируются на кампанию при её создании,
 а не читаются из конфига в момент решения. Причина в §6.3 `decision.md`: в
@@ -973,6 +1178,11 @@ CREATE INDEX ix_finding_round_finding ON finding_round (finding_id);
 Код при этом обязан проверить, что `reviewer_attempt_id` принадлежит линии
 `owner_lane_id` — это констрейнтом не выражается, потому что требует join.
 
+`owner_lane_id` ссылается на **слот**, а не на исполнителя (§5.2). Владение
+переживает замену линии: если человек заменил исполнителя слота, решения по
+findings этого владельца выносит новое поколение, и гейт `a.lane_id =
+fr.owner_lane_id` продолжает выполняться без единой правки.
+
 `entry_kind = issued` создаётся для точного roster, который автор получил до
 `fix_check`; его `author_attempt_id` обязан совпасть с попыткой
 `review_round.preceding_revision_id`, что проверяет гейт §5.2. Reconciliation
@@ -1283,6 +1493,12 @@ CREATE INDEX ix_exposure_subject ON reviewer_exposure (subject_id, provider, mod
 
 Ключ — **фактическая пара `provider` + `model`**, а не `profile_id`: у `claude-z`
 запрос `opus` возвращает `glm-5.2`, и по имени профиля свежесть не определяется.
+
+Отсюда же следует, что замена исполнителя слота (§5.2) требует своей строки
+экспозиции: ключ включает `campaign_id`, а пара у нового поколения другая, так
+что конфликта с прежней строкой нет. Тот же отбор — свежесть плюс запрет пары
+автора ревизии — новое назначение проходит заново, а не наследует от
+заменённого.
 
 **Запись создаётся в момент передачи входа модели, а не при успешном
 завершении.** Ревьюер, который получил ревизию и вернул невалидный вывод, её уже
@@ -1761,6 +1977,7 @@ CREATE TABLE verification_run (
 CREATE INDEX ix_stage_by_branch     ON stage_execution (branch_id, state);
 CREATE INDEX ix_attempt_by_stage    ON step_attempt (stage_id, role);
 CREATE INDEX ix_attempt_running     ON step_attempt (run_id) WHERE outcome IS NULL;
+CREATE INDEX ix_attempt_by_round    ON step_attempt (round_id, lane_id, role);
 CREATE INDEX ix_campaign_by_stage   ON review_campaign (stage_id, state);
 CREATE INDEX ix_campaign_open       ON review_campaign (run_id) WHERE closed_at IS NULL;
 CREATE INDEX ix_finding_by_subject  ON finding (subject_id);
@@ -1776,6 +1993,10 @@ CREATE INDEX ix_dep_child           ON task_dependency (child_task_id);
 
 `ix_dep_child` — под запрос готовности: задача готова, когда у неё нет
 незакрытых родителей.
+
+`ix_attempt_by_round` — под roster-гейт §5.2: он выполняется перед каждым
+`review_round.result` и перед spawn reconciler, то есть чаще, чем что-либо
+другое в review-домене.
 
 ```sql
 -- Готовые задачи.
@@ -1814,14 +2035,14 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 9 | `escalation_severity` монотонна вверх | **База** | Вычисляется `MAX(rank)` по периоду; понизить нечего |
 | 10 | Исход ревьюера совместим с disposition | **База** | CHECK в `finding_round` — **с явной проверкой `disposition IS NOT NULL`**, иначе NULL проходит |
 | 11 | Решение выносит владелец круга, оно единственное | **База + код** | Одна колонка `reviewer_decision`; запрос §5.2 проверяет роль, stage, outcome и `lane_id = owner_lane_id`; у `post_check` решения быть не может по CHECK |
-| 12 | Новая кампания не получает прежнюю сессию | **База + код** | `reviewer_exposure` + отбор линий по свободным парам provider+model |
+| 12 | Новая кампания не получает прежнюю сессию | **База + код** | `reviewer_exposure` + отбор линий по свободным парам provider+model; замена исполнителя слота проходит тот же отбор |
 | 13 | У каждого закрытия записан `resolution_authority`; reopen следует ему | **База + код** | FK на `resolution_kind` + CHECK с `ELSE` выводят authority из resolution; маршрутизация reopen — код |
 | 14 | Переход и событие — одна транзакция | **Код** | Единственный writer, `store.transaction()` пишет событие вместе с переходом |
 | 15 | Все переходы §6.6 атомарны целиком | **Код** | Шесть именованных транзакционных операций; branch-scoped вопрос включает blocker с обеими ссылками и `branch.state='blocked'` |
 | 16 | Ответ записан до снятия блокировки | **Код** | Ответ, clear `human_question` и новый `awaiting_continue` пишутся одной TX; ветка остаётся `blocked` |
 | 17 | После перезапуска нет двойного перехода и двойной работы | **Код** | Recovery audit: `outcome IS NULL` → `interrupted`; новая попытка после подтверждения смерти pgid |
 | 18 | Один экземпляр сервиса на каталог | **ОС** | `flock` на файле + lease с heartbeat |
-| 19 | Не более одной активной попытки на линию или шаг | **База** | Partial unique index `ux_attempt_active` |
+| 19 | Не более одной активной попытки на линию или шаг | **База** | Partial unique index `ux_attempt_active`; ключ — слот, поэтому заменённое и заменившее поколения не могут работать параллельно |
 | 20 | Один принятый ответ; `UNIQUE(transport, update_id)` | **База** | `UNIQUE(question_id)` в `human_answer`; PK в `telegram_inbox` |
 | 21 | FK между кампанией, кругом, замечанием, наблюдением, попыткой; `UNIQUE(campaign_id, finding_id, round_no)` | **База** | FK, `entry_kind` FK и UNIQUE прямо в DDL |
 | 22 | Состояние `Run` вычисляется; branch blocker согласован с физическим состоянием ветки | **База + код** | `run_state` — представление; атомарная запись пары и три recovery-запроса §6.2 |
@@ -1851,7 +2072,8 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 остаются три класса** —
 
 1. **полнота множества** — «каждое наблюдение получило одну связь», «каждый
-   открытый ID покрыт» (1, 2, 24);
+   открытый ID покрыт», «каждый слот кворума отработал или отпущен waiver'ом»
+   (1, 2, 24 и roster-гейт §5.2);
 2. **порядок и атомарность** — «событие в той же транзакции», «ответ до снятия
    блокировки», «новая попытка после подтверждения смерти группы» (6, 14–17, 25);
 3. **сравнение с внешним миром или соседней таблицей** — «мутация ревьюера»
@@ -1886,10 +2108,24 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 непривязанными только пока отдельный reconciliation ещё не завершён; записать
 `review_round.result` в таком состоянии запрещает глобальный гейт §5.4.
 
-Обратите внимание на второй: **на место снятой блокировки `human_question`
-ставится `awaiting_continue`** — в той же транзакции. Иначе между снятием одной
-и постановкой другой существует момент, когда ветка выглядит готовой к работе, и
-планировщик её подхватит, не дождавшись команды человека.
+Две операции по составу effective roster (§5.2) — тоже неделимые, но перехода
+машины состояний не дают, потому что кампания и круг остаются в прежнем
+состоянии:
+
+| Операция | Таблицы в одной транзакции |
+|---|---|
+| Линия заменена человеком | `lane_assignment` следующего поколения со ссылкой на заменённое и на `human_answer` + `run_event` |
+| Кворум круга понижен человеком | `lane_waiver(campaign_id, round_no, lane_id)` + `run_event` |
+
+Обе идемпотентны при повторе после падения не проверкой в коде, а
+уникальностью: `UNIQUE (lane_id, generation)` и `UNIQUE (replaces_id)` у первой,
+`UNIQUE (campaign_id, round_no, lane_id)` у второй.
+
+Обратите внимание на переход «Получен ответ»: **на место снятой блокировки
+`human_question` ставится `awaiting_continue`** — в той же транзакции. Иначе
+между снятием одной и постановкой другой существует момент, когда ветка
+выглядит готовой к работе, и планировщик её подхватит, не дождавшись команды
+человека.
 
 ---
 
@@ -1997,8 +2233,8 @@ INSERT INTO verification_status(status) VALUES ('green'),('red'),('error');
 
 ## 14. Уточнения к `decision.md`
 
-Проектирование и последующее ревью таск-планов обнаружили двадцать одно место, где
-решение чего-то не учло, и одну возможность (пункт 5). Ни одно из принятых
+Проектирование и последующее ревью таск-планов обнаружили двадцать два места,
+где решение чего-то не учло, и одну возможность (пункт 5). Ни одно из принятых
 решений не отменяется — но без этих уточнений часть из них нереализуема.
 
 **1. Четвёртый тип связи `reopening`.** §6.3 перечисляет три типа
@@ -2271,6 +2507,26 @@ T1.7b владеет чистым синхронным `HumanGateFormatter`-по
 production-форматирование. Formatter получает готовое решение и контекст, не
 читает БД, не делает I/O и не выбирает reason; returned envelope повторно
 проверяется перед атомарной записью question/outbox/blocker/state/event.
+
+**23. Линия — это слот кворума, а исполнитель у слота сменный.** §7.1.1
+`architecture.md` разрешает человеку заменить исчерпавшую бюджет линию другим
+профилем, не понижая кворум, но модель данных держала профиль прямо в
+`review_lane` под `UNIQUE (campaign_id, lane_index)`. Заменить было нечем:
+`UPDATE` стёр бы исполнителя, чьи попытки и наблюдения уже в аудите, а вставка
+новой строки либо конфликтовала по индексу, либо увеличивала roster и ломала
+правило «минимальный `lane_index` = владелец».
+
+Введено разделение (§5.2): `review_lane` — неизменяемый слот,
+`lane_assignment` — append-only поколения исполнителей, активное определяется
+отсутствием преемника.
+Владение (`owner_lane_id`, `review_observation.lane_id`,
+`finding.first_owner_lane_id`) осталось на слоте, исполнение
+(`step_attempt.lane_assignment_id`) — на поколении, слот продублирован в попытке
+составным FK. Отсюда же два следствия, которых в решении не было: `step_attempt`
+получил `round_id` (иначе полноту roster круга доказать нечем — на стадии живут
+несколько кампаний), а деградация кворума стала durable-строкой
+`lane_waiver(campaign_id, round_no, lane_id, human_answer_id)` вместо факта,
+упомянутого только в тексте вопроса человеку.
 
 ### Что было неверно в первой редакции этого документа
 
