@@ -1,24 +1,85 @@
 #!/usr/bin/env python3
-"""Прогон проверочного SQL-сценария по schema-конструкциям из docs/design.
+"""Прогон проверочного SQL-сценария по конструкциям из docs/design.
 
 Сценарий делится маркером `-- === данные ===`: всё до него — DDL, он
 исполняется одним `executescript`; всё после — по одному statement за раз,
-чтобы ожидаемые нарушения констрейнтов не обрывали прогон.
+чтобы ожидаемое нарушение констрейнта не обрывало прогон.
 
-Строка вида `SELECT 'NN подпись:';` печатается как заголовок шага; результат
-следующего statement печатается под ним, а пойманное исключение — с префиксом
-ERROR. Ожидания записаны в самих подписях, поэтому вывод читается глазами:
-шаг, помеченный «ждём ошибку», обязан её дать, помеченный «ждём тишину» —
-не дать.
+Ожидание каждого шага записывается директивами перед statement:
 
-Использование:  python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql
+    -- @step 03 вторая активная попытка того же слота
+    -- @expect error ux_attempt_active
+    INSERT INTO step_attempt ...
+
+Директивы `@expect`:
+
+    ok              statement обязан выполниться без исключения
+    error [текст]   обязано быть исключение; текст, если указан, — подстрока
+    rows=N          SELECT обязан вернуть ровно N строк
+    empty           то же, что rows=0
+
+Шаг без `@expect` считается подготовкой данных: он обязан пройти без
+исключения, но в отчёт не попадает. Несовпадение ожидания — FAIL и код
+возврата 1, поэтому проверку можно ставить в конвейер, а не читать глазами.
+
+Использование:
+    python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql
 """
 
 import sqlite3
 import sys
 
 
+class Step:
+    def __init__(self):
+        self.name = None
+        self.expect = None      # ("ok"|"error"|"rows", payload)
+
+    def reset(self):
+        self.__init__()
+
+
+def parse_expect(rest: str):
+    kind, _, payload = rest.partition(" ")
+    kind = kind.strip()
+    payload = payload.strip()
+    if kind == "ok":
+        return ("ok", None)
+    if kind == "error":
+        return ("error", payload or None)
+    if kind == "empty":
+        return ("rows", 0)
+    if kind.startswith("rows="):
+        return ("rows", int(kind[5:]))
+    raise ValueError("непонятная директива @expect: %r" % rest)
+
+
+def check(step: Step, error, rows):
+    """Возвращает None при совпадении либо текст расхождения."""
+    kind, payload = step.expect
+    if kind == "ok":
+        return None if error is None else "ждали успех, получили %s" % error
+    if kind == "error":
+        if error is None:
+            return "ждали ошибку, statement прошёл"
+        if payload and payload not in str(error):
+            return "ждали ошибку с %r, получили %s" % (payload, error)
+        return None
+    if kind == "rows":
+        if error is not None:
+            return "ждали %d строк, получили %s" % (payload, error)
+        if len(rows) != payload:
+            return "ждали %d строк, получили %d: %s" % (payload, len(rows), rows)
+        return None
+    return "неизвестный вид ожидания %r" % kind
+
+
 def main(path: str) -> int:
+    # Подписи шагов по-русски, а консоль Windows по умолчанию не UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     with open(path, encoding="utf-8") as fh:
         sql = fh.read()
 
@@ -31,29 +92,55 @@ def main(path: str) -> int:
     con.executescript(head)
     con.execute("PRAGMA foreign_keys = ON")
 
-    stmt = ""
+    step, stmt = Step(), ""
+    passed = failed = 0
+
     for line in tail.splitlines(True):
-        if line.strip().startswith("--"):
+        stripped = line.strip()
+        if stripped.startswith("-- @step "):
+            step.name = stripped[len("-- @step "):]
             continue
+        if stripped.startswith("-- @expect "):
+            step.expect = parse_expect(stripped[len("-- @expect "):])
+            continue
+        if stripped.startswith("--"):
+            continue
+
         stmt += line
         if not sqlite3.complete_statement(stmt):
             continue
         statement, stmt = stmt.strip(), ""
         if not statement:
             continue
+
+        error = rows = None
         try:
             rows = con.execute(statement).fetchall()
-        except Exception as exc:            # ожидаемые нарушения — часть сценария
-            print("    ERROR:", type(exc).__name__, exc)
+        except Exception as exc:                      # ожидаемое — часть сценария
+            error = "%s: %s" % (type(exc).__name__, exc)
+
+        if step.expect is None:
+            if error is not None:
+                print("FAIL  подготовка данных: %s" % error)
+                print("      %s" % statement.splitlines()[0])
+                failed += 1
+            step.reset()
             continue
-        if statement.startswith("SELECT '"):
-            print(statement[8:statement.index("'", 8)])
-            continue
-        for row in rows:
-            print("   ", row)
+
+        problem = check(step, error, rows)
+        label = step.name or statement.splitlines()[0]
+        if problem is None:
+            passed += 1
+            print("OK    %s" % label)
+        else:
+            failed += 1
+            print("FAIL  %s" % label)
+            print("      %s" % problem)
+        step.reset()
 
     con.close()
-    return 0
+    print("\nпройдено %d, провалено %d" % (passed, failed))
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

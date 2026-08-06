@@ -643,9 +643,9 @@ ID пишутся отдельно. Входящий update, ответ и от�
 | Переход | Что входит в одну транзакцию |
 |---|---|
 | Задан branch-scoped вопрос человеку | `HumanQuestion` + запись в `notification_outbox` + `Blocker(branch_id, question_id)` + `branch.state = blocked` + событие |
-| Получен ответ | `HumanAnswer` + отметка update как обработанного + снятие `human_question` + новый `Blocker(awaiting_continue, branch_id)` при сохранённом `branch.state = blocked` + review-следствие (`max_author_revisions += 1` и прежний `fix_cycle` либо терминальный `closed_escalated`) + событие |
+| Получен ответ | `HumanAnswer` + отметка update как обработанного + снятие `human_question` + новый `Blocker(awaiting_continue, branch_id)` при сохранённом `branch.state = blocked` + review-следствие (`max_author_revisions += 1` и прежний `fix_cycle`; терминальный `closed_escalated`; замена исполнителя линии либо waiver кворума при ответе на `lane_failure` — `db-schema.md` §14.23) + событие |
 | Задача выполнена | Терминальный результат попытки + закрытие задачи в графе + пересчёт готовности зависимых + событие |
-| Круг ревью закрыт | Три пустых гейта: observations без link, открытые findings кампании без строки участия в текущем круге и незавершённые `finding_round(entry_kind=issued)`; затем допустимые `post_check`-строки + `review_round.result` + состояние кампании (`closed_clean` либо прежний `fix_cycle` при human gate) + событие |
+| Круг ревью закрыт | Пустые гейты: observations без link, открытые findings кампании без строки участия в текущем круге, незавершённые `finding_round(entry_kind=issued)` и — только в круге `discovery` — слот кворума без успешной попытки ревьюера либо waiver'а человека (`db-schema.md` §5.2 и §14.23); затем допустимые `post_check`-строки + `review_round.result` + состояние кампании (`closed_clean` либо прежний `fix_cycle` при human gate) + событие |
 | Импорт или переимпорт графа | Задачи + рёбра + `source_artifact_revision` + инвалидация незавершённых задач прежней ревизии + событие |
 | Эскалация | `review_round.result = escalated` + snapshot решения (значение, порог, версия политики) + `HumanQuestion` + outbox + `Blocker(branch_id, question_id)` + `branch.state = blocked`; кампания остаётся `fix_cycle` + событие |
 
