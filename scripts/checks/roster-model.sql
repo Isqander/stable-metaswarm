@@ -24,7 +24,9 @@ CREATE TABLE review_campaign (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id   INTEGER NOT NULL REFERENCES run(id),
   stage_id INTEGER NOT NULL,
-  UNIQUE (stage_id, id)
+  expected_lane_count INTEGER NOT NULL,
+  UNIQUE (stage_id, id),
+  UNIQUE (id, run_id)
 );
 
 CREATE TABLE run_profile_resolution (
@@ -52,9 +54,12 @@ CREATE TABLE review_round (
 CREATE TABLE review_lane (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES review_campaign(id),
+  run_id      INTEGER NOT NULL REFERENCES run(id),
   lane_index  INTEGER NOT NULL,
   UNIQUE (campaign_id, lane_index),
-  UNIQUE (campaign_id, id)
+  UNIQUE (campaign_id, id),
+  UNIQUE (id, run_id),
+  FOREIGN KEY (campaign_id, run_id) REFERENCES review_campaign(id, run_id)
 );
 
 CREATE TRIGGER trg_lane_immutable
@@ -72,6 +77,7 @@ END;
 CREATE TABLE lane_assignment (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   lane_id         INTEGER NOT NULL REFERENCES review_lane(id),
+  run_id          INTEGER NOT NULL REFERENCES run(id),
   generation      INTEGER NOT NULL,
   profile_id      TEXT    NOT NULL,
   replaces_id     INTEGER UNIQUE REFERENCES lane_assignment(id),
@@ -80,6 +86,8 @@ CREATE TABLE lane_assignment (
   event_id        INTEGER NOT NULL REFERENCES run_event(id),
   assigned_at     INTEGER NOT NULL,
   UNIQUE (lane_id, generation),
+  FOREIGN KEY (lane_id, run_id)    REFERENCES review_lane(id, run_id),
+  FOREIGN KEY (run_id, profile_id) REFERENCES run_profile_resolution(run_id, profile_id),
   CHECK ((generation = 1) = (replaces_id IS NULL)),
   CHECK ((generation = 1) = (human_answer_id IS NULL))
 );
@@ -193,7 +201,7 @@ CREATE UNIQUE INDEX ux_attempt_active
   ON step_attempt (stage_id, role, COALESCE(lane_id, -1))
   WHERE outcome IS NULL;
 
-CREATE INDEX ix_attempt_by_round ON step_attempt (round_id, lane_id, role);
+CREATE INDEX ix_attempt_by_round ON step_attempt (round_id, lane_assignment_id, role);
 
 CREATE VIEW effective_roster AS
 SELECT l.campaign_id, l.id AS lane_id, l.lane_index,
@@ -226,18 +234,19 @@ INSERT INTO run_profile_resolution(run_id, profile_id, provider, model, resolved
 
 -- Кампания 1 на стадии 7: два слота, круг discovery и круг fix_check.
 -- Кампания 2 на стадии 8: два слота, только discovery.
-INSERT INTO review_campaign(id, run_id, stage_id) VALUES (1, 1, 7), (2, 1, 8);
+INSERT INTO review_campaign(id, run_id, stage_id, expected_lane_count) VALUES
+  (1, 1, 7, 2), (2, 1, 8, 2), (3, 1, 9, 2);
 INSERT INTO review_round(id, campaign_id, round_no, kind, preceding_revision_id) VALUES
   (1, 1, 1, 'discovery', NULL),
   (2, 1, 2, 'fix_check', 1),
   (3, 2, 1, 'discovery', NULL);
-INSERT INTO review_lane(id, campaign_id, lane_index) VALUES
-  (1, 1, 0), (2, 1, 1), (3, 2, 0), (4, 2, 1);
-INSERT INTO lane_assignment(id, lane_id, generation, profile_id, event_id, assigned_at)
-VALUES (1, 1, 1, 'p-a', 1, 100),
-       (2, 2, 1, 'p-b', 1, 100),
-       (3, 3, 1, 'p-c', 1, 100),
-       (4, 4, 1, 'p-d', 1, 100);
+INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES
+  (1, 1, 1, 0), (2, 1, 1, 1), (3, 2, 1, 0), (4, 2, 1, 1);
+INSERT INTO lane_assignment(id, lane_id, run_id, generation, profile_id, event_id, assigned_at)
+VALUES (1, 1, 1, 1, 'p-a', 1, 100),
+       (2, 2, 1, 1, 'p-b', 1, 100),
+       (3, 3, 1, 1, 'p-c', 1, 100),
+       (4, 4, 1, 1, 'p-d', 1, 100);
 
 -- @step 01 roster кампании 1: пара выводится из резолвинга прогона
 -- @expect rows-json [[0, "p-a", "anthropic", "opus", 1], [1, "p-b", "openai", "gpt", 1]]
@@ -277,23 +286,23 @@ UPDATE step_attempt SET outcome = 'failed' WHERE lane_id = 2 AND outcome IS NULL
 
 -- @step 05 замена без ответа человека
 -- @expect error human_answer_id
-INSERT INTO lane_assignment(lane_id, generation, profile_id, replaces_id, event_id, assigned_at)
-VALUES (2, 2, 'p-e', 2, 1, 200);
+INSERT INTO lane_assignment(lane_id, run_id, generation, profile_id, replaces_id, event_id, assigned_at)
+VALUES (2, 1, 2, 'p-e', 2, 1, 200);
 
 -- @step 06 замена с разрывом цепочки поколений
 -- @expect error previous generation
-INSERT INTO lane_assignment(lane_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
-VALUES (2, 3, 'p-e', 2, 1, 1, 200);
+INSERT INTO lane_assignment(lane_id, run_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
+VALUES (2, 1, 3, 'p-e', 2, 1, 1, 200);
 
 -- @step 07 замена ссылается на назначение чужого слота
 -- @expect error previous generation
-INSERT INTO lane_assignment(lane_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
-VALUES (1, 2, 'p-e', 2, 1, 1, 200);
+INSERT INTO lane_assignment(lane_id, run_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
+VALUES (1, 1, 2, 'p-e', 2, 1, 1, 200);
 
 -- @step 08 корректная замена по ответу человека 1
 -- @expect ok
-INSERT INTO lane_assignment(id, lane_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
-VALUES (5, 2, 2, 'p-e', 2, 1, 1, 200);
+INSERT INTO lane_assignment(id, lane_id, run_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
+VALUES (5, 2, 1, 2, 'p-e', 2, 1, 1, 200);
 
 -- @step 09 roster после замены: размер прежний, исполнитель новый
 -- @expect rows-json [[0, "p-a", "anthropic", "opus", 1], [1, "p-e", "minimax", "m2", 2]]
@@ -302,13 +311,13 @@ SELECT lane_index, profile_id, provider, model, generation FROM effective_roster
 
 -- @step 10 идемпотентность: тот же ответ человека второй замены не даёт
 -- @expect error human_answer_id
-INSERT INTO lane_assignment(lane_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
-VALUES (2, 3, 'p-c', 5, 1, 1, 200);
+INSERT INTO lane_assignment(lane_id, run_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
+VALUES (2, 1, 3, 'p-c', 5, 1, 1, 200);
 
 -- @step 11 повтор операции после падения не создаёт третье поколение
 -- @expect error generation
-INSERT INTO lane_assignment(lane_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
-VALUES (2, 2, 'p-c', 2, 2, 1, 200);
+INSERT INTO lane_assignment(lane_id, run_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
+VALUES (2, 1, 2, 'p-c', 2, 2, 1, 200);
 
 -- @step 12 UPDATE прежнего назначения
 -- @expect error immutable
@@ -498,8 +507,8 @@ VALUES (2, 1, 4, 3, 1, 300);
 
 -- @step 39 тем же ответом и заменили линию, и понизили кворум
 -- @expect error already spent
-INSERT INTO lane_assignment(lane_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
-VALUES (4, 2, 'p-a', 4, 2, 1, 400);
+INSERT INTO lane_assignment(lane_id, run_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
+VALUES (4, 1, 2, 'p-a', 4, 2, 1, 400);
 
 -- @step 40 и в обратном порядке: ответ уже потрачен на замену
 -- @expect error already spent
@@ -541,11 +550,51 @@ SELECT rr.id FROM review_round rr
                     WHERE a.round_id = rr.id AND a.role = 'reviewer'
                       AND a.outcome = 'succeeded');
 
--- @step 45 foreign_key_check
+-- Кампания 4 существует только ради следующего шага.
+INSERT INTO review_campaign(id, run_id, stage_id, expected_lane_count) VALUES (4, 1, 10, 1);
+INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES (7, 4, 1, 0);
+
+-- @step 45 назначение с профилем, не разрешённым в этом прогоне
+-- @expect error FOREIGN KEY
+INSERT INTO lane_assignment(lane_id, run_id, generation, profile_id, event_id, assigned_at)
+VALUES (7, 1, 1, 'p-missing', 1, 500);
+
+-- Кампания 3: слот 5 с исполнителем, слот 6 — без. Слот 7 нужен шагу 45.
+INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES (5, 3, 1, 0), (6, 3, 1, 1);
+INSERT INTO lane_assignment(id, lane_id, run_id, generation, profile_id, event_id, assigned_at)
+VALUES (6, 5, 1, 1, 'p-a', 1, 100);
+INSERT INTO review_round(id, campaign_id, round_no, kind, preceding_revision_id)
+VALUES (4, 3, 1, 'discovery', NULL);
+INSERT INTO step_attempt(stage_id, role, campaign_id, round_id, lane_id, lane_assignment_id, profile_id, outcome)
+VALUES (9, 'reviewer', 3, 4, 5, 6, 'p-a', 'succeeded');
+
+-- @step 46 слот без действующего назначения — нарушение, а не пустая выборка
+-- @expect rows-json [[6]]
+SELECT l.id FROM review_round rr
+  JOIN review_lane l ON l.campaign_id = rr.campaign_id
+ WHERE rr.id = 4 AND rr.kind = 'discovery'
+   AND NOT EXISTS (SELECT 1 FROM lane_waiver w
+                    WHERE w.campaign_id = rr.campaign_id AND w.round_no = rr.round_no
+                      AND w.lane_id = l.id)
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.lane_id = l.id);
+
+-- @step 47 третий запрос считает действующих исполнителей, а не слоты
+-- @expect rows-json [[3]]
+SELECT rr.campaign_id FROM review_round rr
+  JOIN review_campaign c ON c.id = rr.campaign_id
+ WHERE rr.id = 4 AND rr.kind = 'discovery'
+   AND (SELECT COUNT(*) FROM effective_roster er
+         WHERE er.campaign_id = c.id) <> c.expected_lane_count;
+
+-- @step 48 foreign_key_check
 -- @expect empty
 PRAGMA foreign_key_check;
 
--- @step 46 объекты модели: 3 таблицы (из них 2 новые), 2 индекса,
+-- @step 49 объекты модели: 3 таблицы (из них 2 новые), 2 индекса,
 -- 1 представление, 9 триггеров
 -- @expect rows-json [["index", 2], ["table", 3], ["trigger", 9], ["view", 1]]
 SELECT type, COUNT(*) FROM sqlite_master

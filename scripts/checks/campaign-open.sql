@@ -44,6 +44,7 @@ CREATE TABLE review_campaign (
   UNIQUE (stage_id, ordinal),
   UNIQUE (stage_id, id),
   UNIQUE (id, subject_id),
+  UNIQUE (id, run_id),
   CHECK (expected_lane_count >= 1),
   CHECK (
     (state IN ('closed_clean', 'closed_escalated', 'closed_cancelled'))
@@ -101,9 +102,12 @@ CREATE TABLE review_round (
 CREATE TABLE review_lane (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES review_campaign(id),
+  run_id      INTEGER NOT NULL REFERENCES run(id),
   lane_index  INTEGER NOT NULL,
   UNIQUE (campaign_id, lane_index),
-  UNIQUE (campaign_id, id)
+  UNIQUE (campaign_id, id),
+  UNIQUE (id, run_id),
+  FOREIGN KEY (campaign_id, run_id) REFERENCES review_campaign(id, run_id)
 );
 
 CREATE TRIGGER trg_lane_index_bounds
@@ -118,10 +122,14 @@ END;
 CREATE TABLE lane_assignment (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   lane_id     INTEGER NOT NULL REFERENCES review_lane(id),
+  run_id      INTEGER NOT NULL REFERENCES run(id),
   generation  INTEGER NOT NULL,
   profile_id  TEXT    NOT NULL,
   assigned_at INTEGER NOT NULL,
-  UNIQUE (lane_id, generation)
+  UNIQUE (lane_id, generation),
+  UNIQUE (id, lane_id, profile_id),
+  FOREIGN KEY (lane_id, run_id)    REFERENCES review_lane(id, run_id),
+  FOREIGN KEY (run_id, profile_id) REFERENCES run_profile_resolution(run_id, profile_id)
 );
 
 CREATE TABLE step_attempt (
@@ -132,16 +140,21 @@ CREATE TABLE step_attempt (
   campaign_id INTEGER REFERENCES review_campaign(id),
   round_id    INTEGER REFERENCES review_round(id),
   lane_id     INTEGER REFERENCES review_lane(id),
+  lane_assignment_id INTEGER REFERENCES lane_assignment(id),
   profile_id  TEXT    NOT NULL,
+  subject_revision TEXT,
   outcome     TEXT REFERENCES attempt_outcome(outcome),
   FOREIGN KEY (stage_id, campaign_id) REFERENCES review_campaign(stage_id, id),
   FOREIGN KEY (campaign_id, round_id) REFERENCES review_round(campaign_id, id),
-  FOREIGN KEY (campaign_id, lane_id)  REFERENCES review_lane(campaign_id, id)
+  FOREIGN KEY (campaign_id, lane_id)  REFERENCES review_lane(campaign_id, id),
+  FOREIGN KEY (lane_assignment_id, lane_id, profile_id)
+      REFERENCES lane_assignment(id, lane_id, profile_id)
 );
 
 CREATE UNIQUE INDEX ux_attempt_id_campaign ON step_attempt (id, campaign_id);
 CREATE UNIQUE INDEX ux_attempt_id_run      ON step_attempt (id, run_id);
 CREATE UNIQUE INDEX ux_attempt_id_profile  ON step_attempt (id, profile_id);
+CREATE UNIQUE INDEX ux_attempt_id_revision ON step_attempt (id, subject_revision);
 
 CREATE TABLE run_profile_resolution (
   run_id      INTEGER NOT NULL REFERENCES run(id),
@@ -152,6 +165,18 @@ CREATE TABLE run_profile_resolution (
   PRIMARY KEY (run_id, profile_id),
   UNIQUE (run_id, profile_id, provider, model)
 );
+
+CREATE TRIGGER trg_profile_resolution_immutable
+BEFORE UPDATE ON run_profile_resolution
+BEGIN
+  SELECT RAISE(ABORT, 'run_profile_resolution is immutable');
+END;
+
+CREATE TRIGGER trg_profile_resolution_no_delete
+BEFORE DELETE ON run_profile_resolution
+BEGIN
+  SELECT RAISE(ABORT, 'run_profile_resolution rows are never deleted');
+END;
 
 CREATE TABLE reviewer_exposure (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,7 +191,7 @@ CREATE TABLE reviewer_exposure (
   created_at       INTEGER NOT NULL,
   UNIQUE (subject_id, revision, provider, model, campaign_id),
   FOREIGN KEY (campaign_id, subject_id)       REFERENCES review_campaign(id, subject_id),
-  FOREIGN KEY (subject_id, revision)          REFERENCES review_subject(id, revision),
+  FOREIGN KEY (first_attempt_id, revision)    REFERENCES step_attempt(id, subject_revision),
   FOREIGN KEY (first_attempt_id, campaign_id) REFERENCES step_attempt(id, campaign_id),
   FOREIGN KEY (first_attempt_id, run_id)      REFERENCES step_attempt(id, run_id),
   FOREIGN KEY (first_attempt_id, profile_id)  REFERENCES step_attempt(id, profile_id),
@@ -239,19 +264,19 @@ INSERT INTO review_campaign(id, public_id, run_id, stage_id, subject_id, ordinal
                             expected_lane_count, state, opened_at)
 VALUES (97, 'C-97', 1, 7, 1, 8, 'high', 'v1', 0, 'discovery', 50);
 
-INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (1, 1, 0), (2, 1, 1);
+INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES (1, 1, 1, 0), (2, 1, 1, 1);
 
 -- @step 05 слот с индексом за пределами заявленного кворума
 -- @expect error outside declared quorum
-INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (96, 1, 2);
+INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES (96, 1, 1, 2);
 
 -- @step 06 слот с отрицательным индексом
 -- @expect error outside declared quorum
-INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (95, 1, -1);
+INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES (95, 1, 1, -1);
 
-INSERT INTO lane_assignment(id, lane_id, generation, profile_id, assigned_at)
-VALUES (1, 1, 1, 'p-a', 100),
-       (2, 2, 1, 'p-b', 100);
+INSERT INTO lane_assignment(id, lane_id, run_id, generation, profile_id, assigned_at)
+VALUES (1, 1, 1, 1, 'p-a', 100),
+       (2, 2, 1, 1, 'p-b', 100);
 INSERT INTO review_round(id, campaign_id, round_no, kind) VALUES (1, 1, 1, 'discovery');
 
 -- @step 07 открытие завершено: запрос незавершённости пуст
@@ -273,9 +298,9 @@ INSERT INTO review_campaign(id, public_id, run_id, stage_id, subject_id, ordinal
                             severity_threshold, policy_version,
                             expected_lane_count, state, opened_at)
 VALUES (2, 'C-2', 1, 8, 2, 1, 'high', 'v1', 2, 'discovery', 50);
-INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (3, 2, 0);
-INSERT INTO lane_assignment(id, lane_id, generation, profile_id, assigned_at)
-VALUES (3, 3, 1, 'p-a', 100);
+INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES (3, 2, 1, 0);
+INSERT INTO lane_assignment(id, lane_id, run_id, generation, profile_id, assigned_at)
+VALUES (3, 3, 1, 1, 'p-a', 100);
 INSERT INTO review_round(id, campaign_id, round_no, kind) VALUES (2, 2, 1, 'discovery');
 
 -- @step 08 неполный roster виден recovery audit, хотя каждый слот оформлен
@@ -301,9 +326,9 @@ SELECT rr.campaign_id FROM review_round rr
          WHERE l.campaign_id = c.id) <> c.expected_lane_count;
 
 -- Кампания 2 дооткрыта: второй слот с исполнителем.
-INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (4, 2, 1);
-INSERT INTO lane_assignment(id, lane_id, generation, profile_id, assigned_at)
-VALUES (4, 4, 1, 'p-b', 100);
+INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES (4, 2, 1, 1);
+INSERT INTO lane_assignment(id, lane_id, run_id, generation, profile_id, assigned_at)
+VALUES (4, 4, 1, 1, 'p-b', 100);
 
 -- @step 10 после дооткрытия гейт состава пуст
 -- @expect empty
@@ -318,7 +343,7 @@ INSERT INTO review_campaign(id, public_id, run_id, stage_id, subject_id, ordinal
                             severity_threshold, policy_version,
                             expected_lane_count, state, opened_at)
 VALUES (3, 'C-3', 1, 9, 1, 1, 'high', 'v1', 1, 'discovery', 50);
-INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (5, 3, 0);
+INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES (5, 3, 1, 0);
 INSERT INTO review_round(id, campaign_id, round_no, kind) VALUES (3, 3, 1, 'discovery');
 
 -- @step 11 слот без исполнителя тоже считается незавершённым открытием
@@ -375,8 +400,9 @@ UPDATE review_campaign SET state = 'fix_cycle', closed_at = NULL WHERE id = 1;
 SELECT from_state, to_state FROM campaign_transition ORDER BY from_state, to_state;
 
 -- Линия 0 кампании 2 получает вход: сначала попытка, затем допуск.
-INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id, profile_id, outcome)
-VALUES (1, 1, 8, 'reviewer', 2, 2, 3, 'p-a', NULL);
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,
+                         lane_assignment_id, profile_id, subject_revision, outcome)
+VALUES (1, 1, 8, 'reviewer', 2, 2, 3, 3, 'p-a', 'sha-2', NULL);
 
 -- @step 21 допуск ссылается на попытку — обратный порядок невозможен
 -- @expect ok
@@ -409,8 +435,9 @@ INSERT INTO reviewer_exposure(run_id, subject_id, revision, provider, model, cam
 VALUES (1, 2, 'sha-2', 'openai', 'gpt', 2, 1, 'p-a', 600);
 
 -- Попытка кампании 1 — она понадобится следующему шагу как чужая.
-INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id, profile_id, outcome)
-VALUES (2, 1, 7, 'reviewer', 1, 1, 1, 'p-b', NULL);
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,
+                         lane_assignment_id, profile_id, subject_revision, outcome)
+VALUES (2, 1, 7, 'reviewer', 1, 1, 2, 2, 'p-b', 'sha-1', NULL);
 
 -- @step 27 попытка допуска принадлежит другой кампании
 -- @expect error FOREIGN KEY
@@ -418,8 +445,9 @@ INSERT INTO reviewer_exposure(run_id, subject_id, revision, provider, model, cam
 VALUES (1, 2, 'sha-2', 'openai', 'gpt', 2, 2, 'p-b', 600);
 
 -- Штатный путь 1: reconciler наследует профиль линии 0 — та же пара.
-INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id, profile_id, outcome)
-VALUES (3, 1, 8, 'reconciler', 2, 2, NULL, 'p-a', NULL);
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,
+                         lane_assignment_id, profile_id, subject_revision, outcome)
+VALUES (3, 1, 8, 'reconciler', 2, 2, NULL, NULL, 'p-a', 'sha-2', NULL);
 
 -- @step 28 второй строки допуска на ту же пару база не создаёт
 -- @expect error reviewer_exposure.subject_id
@@ -428,8 +456,9 @@ VALUES (1, 2, 'sha-2', 'anthropic', 'opus', 2, 3, 'p-a', 600);
 
 -- Штатный путь 2: retry после contract_error той же парой.
 UPDATE step_attempt SET outcome = 'contract_error' WHERE id = 1;
-INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id, profile_id, outcome)
-VALUES (4, 1, 8, 'reviewer', 2, 2, 3, 'p-a', NULL);
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,
+                         lane_assignment_id, profile_id, subject_revision, outcome)
+VALUES (4, 1, 8, 'reviewer', 2, 2, 3, 3, 'p-a', 'sha-2', NULL);
 
 -- @step 29 membership остаётся одна и указывает на первую попытку
 -- @expect rows-json [[1, 1]]
@@ -439,8 +468,9 @@ SELECT COUNT(*), MIN(first_attempt_id) FROM reviewer_exposure
 
 -- @step 30 та же пара в другой кампании — свой допуск, конфликта нет
 -- @expect ok
-INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id, profile_id, outcome)
-VALUES (5, 1, 7, 'reviewer', 1, 1, 1, 'p-a', NULL);
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,
+                         lane_assignment_id, profile_id, subject_revision, outcome)
+VALUES (5, 1, 7, 'reviewer', 1, 1, 1, 1, 'p-a', 'sha-1', NULL);
 
 -- @step 31 допуск той же пары в кампании 1
 -- @expect ok
@@ -460,16 +490,47 @@ UPDATE reviewer_exposure SET model = 'sonnet' WHERE campaign_id = 2;
 -- @expect error never deleted
 DELETE FROM reviewer_exposure WHERE campaign_id = 2;
 
+-- Штатный fix_check: та же линия проверяет уже другую ревизию предмета.
+INSERT INTO review_round(id, campaign_id, round_no, kind) VALUES (4, 2, 2, 'fix_check');
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,
+                         lane_assignment_id, profile_id, subject_revision, outcome)
+VALUES (6, 1, 8, 'reviewer', 2, 4, 3, 3, 'p-a', 'sha-2-fix1', NULL);
+
+-- @step 32c допуск на ревизию правки: своя строка, конфликта с discovery нет
+-- @expect ok
+INSERT INTO reviewer_exposure(run_id, subject_id, revision, provider, model, campaign_id, first_attempt_id, profile_id, created_at)
+VALUES (1, 2, 'sha-2-fix1', 'anthropic', 'opus', 2, 6, 'p-a', 800);
+
+-- @step 32d ledger свежести помнит обе ревизии, а не только исходную
+-- @expect rows-json [["sha-2"], ["sha-2-fix1"]]
+SELECT revision FROM reviewer_exposure
+ WHERE campaign_id = 2 AND provider = 'anthropic' AND model = 'opus'
+ ORDER BY revision;
+
+-- @step 32e допуск на ревизию, которой попытка не получала
+-- @expect error FOREIGN KEY
+INSERT INTO reviewer_exposure(run_id, subject_id, revision, provider, model, campaign_id, first_attempt_id, profile_id, created_at)
+VALUES (1, 2, 'sha-2-fix9', 'openai', 'gpt', 2, 6, 'p-a', 800);
+
+-- @step 32f UPDATE резолвинга профилей: пара исполнителя не меняется задним числом
+-- @expect error immutable
+UPDATE run_profile_resolution SET model = 'sonnet' WHERE profile_id = 'p-a';
+
+-- @step 32g DELETE резолвинга профилей
+-- @expect error never deleted
+DELETE FROM run_profile_resolution WHERE profile_id = 'p-b';
+
 -- @step 33 foreign_key_check
 -- @expect empty
 PRAGMA foreign_key_check;
 
--- @step 34 объекты: таблица переходов и шесть триггеров кампании, слота
--- и допуска
--- @expect rows-json [["table", 1], ["trigger", 6]]
+-- @step 34 объекты: таблица переходов и восемь триггеров кампании, слота,
+-- допуска и резолвинга
+-- @expect rows-json [["table", 1], ["trigger", 8]]
 SELECT type, COUNT(*) FROM sqlite_master
  WHERE name IN ('campaign_transition', 'trg_campaign_state_transition',
                 'trg_campaign_initial_state', 'trg_campaign_snapshot_immutable',
                 'trg_lane_index_bounds',
-                'trg_exposure_immutable', 'trg_exposure_no_delete')
+                'trg_exposure_immutable', 'trg_exposure_no_delete',
+                'trg_profile_resolution_immutable', 'trg_profile_resolution_no_delete')
  GROUP BY type ORDER BY type;

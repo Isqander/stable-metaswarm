@@ -3,21 +3,23 @@
 **Инвентарь ниже устарел намеренно.** Числа `61/24/6/6` относятся к шестой
 редакции; после неё вошли модель effective roster (C-01b) — **+2 таблицы,
 +2 индекса, +1 представление, +9 триггеров** — и schema-effects C-01a/C-01c и
-C-04: **+1 таблица** (`campaign_transition`), **+3 индекса**, **+6 триггеров**,
-плюс колонки `review_campaign.expected_lane_count` и
-`reviewer_exposure.profile_id`. Остальные schema-effects того же свода
+C-04: **+1 таблица** (`campaign_transition`), **+4 индекса**, **+8 триггеров**,
+плюс колонки `expected_lane_count`, `reviewer_exposure.profile_id`,
+`step_attempt.subject_revision` и `run_id` у слота и назначения. Остальные
+schema-effects того же свода
 (составные FK по C-06, триггеры `BEFORE DELETE` по C-07 и C-08, ограничение
 `max_author_revisions`) вносятся одним DDL-заходом следом. Связный
 прогон DDL и пересчёт inventory выполняются **один раз** после него, чтобы не
 считать одно и то же дважды. Конструкции effective roster при этом уже
-проверены отдельным прогоном на SQLite 3.45: 46 сценариев с машинными
+проверены отдельным прогоном на SQLite 3.45: 49 сценариев с машинными
 ожиданиями, включая контрпример «одна линия вернула `[]`, вторая не
 завершилась», замену исполнителя, повтор замены после падения, запрет
 параллельной работы двух поколений слота, зачёт работы вытесненного поколения,
 cross-campaign ссылки, формы строки попытки по роли и попытку потратить один
-ответ человека дважды. Второй прогон, `campaign-open.sql`, — 38 сценариев по
+ответ человека дважды. Второй прогон, `campaign-open.sql`, — 43 сценария по
 открытию кампании, матрице переходов, неизменяемости снимка и допуску
-ревьюера. Оба воспроизводятся и падают ненулевым кодом:
+ревьюера, включая штатный `fix_check` по новой ревизии. Оба воспроизводятся и
+падают ненулевым кодом:
 `python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql`.
 
 Оба прогона доказывают **констрейнты и cardinality** — какие строки база
@@ -340,6 +342,8 @@ CREATE TABLE step_attempt (
   round_id           INTEGER REFERENCES review_round(id),
   lane_id            INTEGER REFERENCES review_lane(id),          -- слот
   lane_assignment_id INTEGER REFERENCES lane_assignment(id),      -- исполнитель
+  subject_revision   TEXT,                                        -- что реально
+                                                                  -- получил агент
   session_id         INTEGER REFERENCES logical_session(id),
   -- вход: неизменяем
   profile_id         TEXT    NOT NULL,
@@ -392,6 +396,7 @@ CREATE TABLE step_attempt (
 CREATE UNIQUE INDEX ux_attempt_id_campaign ON step_attempt (id, campaign_id);
 CREATE UNIQUE INDEX ux_attempt_id_run      ON step_attempt (id, run_id);
 CREATE UNIQUE INDEX ux_attempt_id_profile  ON step_attempt (id, profile_id);
+CREATE UNIQUE INDEX ux_attempt_id_revision ON step_attempt (id, subject_revision);
 
 -- Инвариант 19: не более одной активной попытки на шаг или линию.
 CREATE UNIQUE INDEX ux_attempt_active
@@ -543,6 +548,7 @@ CREATE TABLE review_campaign (
   UNIQUE (stage_id, ordinal),
   UNIQUE (stage_id, id),                           -- под scope-FK из step_attempt
   UNIQUE (id, subject_id),                         -- под scope-FK из exposure
+  UNIQUE (id, run_id),                             -- под scope-FK из review_lane
   CHECK (expected_lane_count >= 1),
   CHECK (
     (state IN ('closed_clean', 'closed_escalated', 'closed_cancelled'))
@@ -600,9 +606,12 @@ END;
 CREATE TABLE review_lane (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES review_campaign(id),
+  run_id      INTEGER NOT NULL REFERENCES run(id),  -- якорь резолвинга профилей
   lane_index  INTEGER NOT NULL,                     -- 0,1,… минимальный = владелец
   UNIQUE (campaign_id, lane_index),
-  UNIQUE (campaign_id, id)                          -- под scope-FK ниже
+  UNIQUE (campaign_id, id),                         -- под scope-FK ниже
+  UNIQUE (id, run_id),                              -- под scope-FK назначения
+  FOREIGN KEY (campaign_id, run_id) REFERENCES review_campaign(id, run_id)
 );
 
 -- Индекс слота лежит внутри заявленного кворума: 0..expected_lane_count-1.
@@ -636,6 +645,7 @@ END;
 CREATE TABLE lane_assignment (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   lane_id         INTEGER NOT NULL REFERENCES review_lane(id),
+  run_id          INTEGER NOT NULL REFERENCES run(id),
   generation      INTEGER NOT NULL,                 -- 1,2,… внутри слота
   profile_id      TEXT    NOT NULL,                 -- пара берётся из
                                                     -- run_profile_resolution
@@ -646,6 +656,11 @@ CREATE TABLE lane_assignment (
   event_id        INTEGER NOT NULL REFERENCES run_event(id),
   assigned_at     INTEGER NOT NULL,
   UNIQUE (lane_id, generation),
+  -- Прогон назначения — прогон его слота, а профиль обязан быть разрешён
+  -- именно в этом прогоне. Без второго ключа назначение с неизвестным
+  -- профилем принимается базой и исчезает из effective_roster.
+  FOREIGN KEY (lane_id, run_id)    REFERENCES review_lane(id, run_id),
+  FOREIGN KEY (run_id, profile_id) REFERENCES run_profile_resolution(run_id, profile_id),
   -- Первое назначение никого не заменяет и не требует ответа человека;
   -- любое последующее — и то, и другое.
   CHECK ((generation = 1) = (replaces_id IS NULL)),
@@ -806,22 +821,27 @@ reconciliation, проходит гейт `a.lane_id = fr.owner_lane_id` без 
 -- Должен вернуть 0 строк перед result круга discovery и перед spawn
 -- reconciler: у каждого слота либо успешная попытка ревьюера в этом круге,
 -- сделанная его ТЕКУЩИМ исполнителем, либо durable waiver человека.
-SELECT er.lane_id
+-- Итерация идёт по слотам, а не по effective_roster: слот без действующего
+-- назначения обязан быть нарушением, а не исчезнуть из выборки.
+SELECT l.id AS lane_id
   FROM review_round rr
-  JOIN effective_roster er ON er.campaign_id = rr.campaign_id
+  JOIN review_lane  l ON l.campaign_id = rr.campaign_id
  WHERE rr.id = :round_id
    AND rr.kind = 'discovery'
    AND NOT EXISTS (
          SELECT 1 FROM lane_waiver w
           WHERE w.campaign_id = rr.campaign_id
             AND w.round_no    = rr.round_no
-            AND w.lane_id     = er.lane_id)
+            AND w.lane_id     = l.id)
    AND NOT EXISTS (
-         SELECT 1 FROM step_attempt a
-          WHERE a.round_id            = rr.id
-            AND a.lane_assignment_id  = er.assignment_id
-            AND a.role                = 'reviewer'
-            AND a.outcome             = 'succeeded');
+         SELECT 1
+           FROM effective_roster er
+           JOIN step_attempt a
+                ON a.round_id           = rr.id
+               AND a.lane_assignment_id = er.assignment_id
+               AND a.role               = 'reviewer'
+               AND a.outcome            = 'succeeded'
+          WHERE er.lane_id = l.id);
 
 -- И отдельно: хотя бы одно мнение. Иначе два последовательных waiver
 -- закрывают круг из двух линий вообще без проверки, и он выглядит как clean.
@@ -832,20 +852,25 @@ SELECT rr.id AS round_id
  WHERE rr.id = :round_id
    AND rr.kind = 'discovery'
    AND NOT EXISTS (
-         SELECT 1 FROM step_attempt a
-          WHERE a.round_id = rr.id
-            AND a.role     = 'reviewer'
-            AND a.outcome  = 'succeeded');
+         SELECT 1
+           FROM effective_roster er
+           JOIN step_attempt a
+                ON a.round_id           = rr.id
+               AND a.lane_assignment_id = er.assignment_id
+               AND a.role               = 'reviewer'
+               AND a.outcome            = 'succeeded'
+          WHERE er.campaign_id = rr.campaign_id);
 
--- И третье: слотов ровно столько, сколько заявлено. Первые два запроса
--- ходят по существующим слотам и недобор состава не увидят.
+-- И третье: действующих исполнителей ровно столько, сколько заявлено.
+-- Считается effective_roster, а не review_lane: слот, оставшийся без
+-- назначения, иначе прошёл бы как полноценная линия кворума.
 SELECT rr.campaign_id
   FROM review_round rr
   JOIN review_campaign c ON c.id = rr.campaign_id
  WHERE rr.id = :round_id
    AND rr.kind = 'discovery'
-   AND (SELECT COUNT(*) FROM review_lane l
-         WHERE l.campaign_id = c.id) <> c.expected_lane_count;
+   AND (SELECT COUNT(*) FROM effective_roster er
+         WHERE er.campaign_id = c.id) <> c.expected_lane_count;
 ```
 
 Все три запроса принимают **только `round_id`**, а кампанию, номер и вид круга
@@ -855,13 +880,26 @@ SELECT rr.campaign_id
 `fix_check` все три пусты по построению, и вызывающему не нужно помнить, к
 какому виду круга гейт применим.
 
-**Почему первый запрос ходит по `effective_roster`, а не по слотам.** Считать
-успешную попытку «по слоту» мало: после замены исполнителя работу мог сдать не
-тот, кто сейчас назначен, — вытесненное поколение. Через представление в зачёт
-идёт попытка **текущего** назначения, и подмена исполнителя перестаёт закрывать
-круг. Обратная сторона: слот без назначения в представление не попадает вовсе,
-поэтому третий запрос — сверка числа слотов с заявленным кворумом — обязателен и
-не дублирует первые два.
+**Почему запросы устроены именно так.** Считать успешную попытку «по слоту»
+мало: после замены исполнителя работу мог сдать не тот, кто сейчас назначен, —
+вытесненное поколение. Поэтому в зачёт идёт попытка **текущего** назначения из
+`effective_roster`. Но и итерировать по самому представлению нельзя: слот, у
+которого действующего назначения нет, из него просто выпадет, и нарушение
+станет невидимым — гейт «не найдёт» строку, о которой должен был сообщить.
+Отсюда разделение ролей: **итерация — по `review_lane`, зачёт — через
+`effective_roster`**. Третий запрос по той же причине считает действующих
+исполнителей, а не слоты: иначе слот без назначения проходит как полноценная
+линия кворума.
+
+Дыра, из-за которой это переписано, стоит того, чтобы назвать её прямо. Пока
+`lane_assignment.profile_id` не был связан с `run_profile_resolution`,
+назначение с неизвестным профилем принималось базой и **исчезало** из
+`effective_roster` — а вместе с ним из всех трёх запросов, которые ходили по
+представлению. Два слота, у одного успешное мнение, у второго такое
+назначение — и все три гейта пусты при кворуме из одной фактической линии.
+Теперь профиль назначения проверяется составным FK через `run_id` слота, так что
+такое назначение просто не вставляется, а запросы устроены так, что даже
+пустой `effective_roster` даёт нарушение, а не тишину.
 
 Контрпример, ради которого гейт написан: первая линия вернула `[]` и завершилась
 успехом, вторая не завершилась вовсе. Три прежних гейта пусты — unlinked
@@ -987,7 +1025,8 @@ fix_cycle` их вообще три.
 
 ```sql
 -- Незавершённое открытие: кампания без круга 1, с числом слотов, не равным
--- заявленному кворуму, либо со слотом без исполнителя. Должен вернуть 0 строк.
+-- заявленному кворуму, либо со слотом без ДЕЙСТВУЮЩЕГО исполнителя.
+-- Должен вернуть 0 строк.
 SELECT c.id
   FROM review_campaign c
  WHERE c.closed_at IS NULL
@@ -998,8 +1037,8 @@ SELECT c.id
              WHERE l.campaign_id = c.id) <> c.expected_lane_count
         OR EXISTS (SELECT 1 FROM review_lane l
                     WHERE l.campaign_id = c.id
-                      AND NOT EXISTS (SELECT 1 FROM lane_assignment a
-                                       WHERE a.lane_id = l.id)));
+                      AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                                       WHERE er.lane_id = l.id)));
 ```
 
 Последнее условие — не паранойя: слот и его первый исполнитель пишутся разными
@@ -1841,11 +1880,13 @@ CREATE TABLE reviewer_exposure (
   profile_id       TEXT    NOT NULL,               -- профиль первой попытки
   created_at       INTEGER NOT NULL,
   UNIQUE (subject_id, revision, provider, model, campaign_id),
-  -- Кампания смотрит на тот же предмет, ревизия принадлежит этому предмету,
-  -- а первая попытка — этой кампании и этому прогону. Иначе строка допуска
-  -- говорит про одно, а ссылается на другое.
+  -- Кампания смотрит на тот же предмет, а первая попытка принадлежит этой
+  -- кампании и этому прогону. Иначе строка допуска говорит про одно, а
+  -- ссылается на другое.
   FOREIGN KEY (campaign_id, subject_id)       REFERENCES review_campaign(id, subject_id),
-  FOREIGN KEY (subject_id, revision)          REFERENCES review_subject(id, revision),
+  -- Ревизия — та, которую попытка реально получила, а не та, с которой
+  -- кампания открылась: в fix_check агент видит output_sha правки автора.
+  FOREIGN KEY (first_attempt_id, revision)    REFERENCES step_attempt(id, subject_revision),
   FOREIGN KEY (first_attempt_id, campaign_id) REFERENCES step_attempt(id, campaign_id),
   FOREIGN KEY (first_attempt_id, run_id)      REFERENCES step_attempt(id, run_id),
   -- И главное: пара provider+model — та, в которую резолвится профиль именно
@@ -1876,6 +1917,19 @@ END;
 
 Ключ — **фактическая пара `provider` + `model`**, а не `profile_id`: у `claude-z`
 запрос `opus` возвращает `glm-5.2`, и по имени профиля свежесть не определяется.
+
+**`revision` — та, которую попытка реально получила, а не та, с которой кампания
+открылась.** Разница появляется на первом же `fix_check`: линия проверяет
+`author_revision.output_sha`, то есть другое состояние предмета, и запись
+исходной ревизии сделала бы ledger свежести ложным — модель видела новое, а в
+базе стоит старое. Поэтому `step_attempt` несёт `subject_revision` (что ушло
+агенту), а строка допуска связана с ним составным ключом
+`(first_attempt_id, revision)`. Прежний FK на `review_subject(id, revision)`
+снят: он запрещал ровно тот случай, ради которого существует `fix_check`.
+Легальность самой ревизии — что это либо ревизия предмета, либо `output_sha`
+одной из авторских правок этой кампании — проверяет T1.3 при создании попытки;
+базой это выражалось бы триггером с рекурсией по кампании, и цена не стоит
+выигрыша.
 
 Отсюда же следует, что замена исполнителя слота (§5.2) требует своей строки
 экспозиции: ключ включает `campaign_id`, а пара у нового поколения другая, так
@@ -1922,29 +1976,38 @@ provider+model на той же ревизии и в той же кампани�
 невозможной ещё до базы.
 
 Сверка — не «проглотить конфликт»: безусловный `INSERT OR IGNORE` запрещён,
-потому что маскирует ошибку вызывающего. Существующая строка допустима
-**только** в двух случаях:
+потому что маскирует ошибку вызывающего. Конфликт по ключу вообще возможен
+только когда ревизия та же — а это два законных случая и один незаконный.
 
-1. **Повтор той же работы.** Новая попытка совпадает с попыткой из строки
-   допуска по `(campaign_id, round_id, lane_id, lane_assignment_id, role)`, у
-   этой пятёрки координат **нет** успешной попытки, а предыдущая завершилась
-   одним из `contract_error`, `transient`, `hung`, `interrupted`. Последний —
-   не забытый: попытка, прерванная перезапуском сервиса, повторяется с чистого
-   листа и бюджета не тратит (`architecture.md` §8).
-2. **Reconciler.** Роль `reconciler` того же круга и той же кампании; линии у
-   него нет по контракту §4.3 `agent-contracts.md`, а профиль по умолчанию
-   совпадает с профилем линии 0 — ради этого случая membership и вводилась.
+**Законно.** Новая попытка принадлежит той же кампании и **действующему**
+назначению того же слота (`lane_assignment_id` совпадает с `assignment_id`
+слота в `effective_roster`) либо это `reconciler` той же кампании и той же
+ревизии. Сюда попадают оба штатных пути:
 
-Всё остальное — отказ, и в первую очередь вторая discovery-линия с той же
-фактической парой, попытка вытесненного поколения слота, попытка другого круга
-и повтор поверх уже успешной работы. При отказе откатывается вся транзакция,
-включая только что созданную попытку: иначе в базе останется attempt без
-допуска, и recovery увидит осиротевшую запись.
+- *retry в том же круге* — предыдущая попытка того же логического шага
+  завершилась `contract_error`, `transient`, `hung` или `interrupted`. Последний
+  не забыт: прерванная перезапуском попытка повторяется с чистого листа и
+  бюджета не тратит (`architecture.md` §8). «Предыдущая» здесь — строго
+  **последняя по `id`** среди попыток ключа
+  `(campaign_id, round_id, lane_assignment_id, role)`; иначе после цепочки
+  `contract_error → failed` реализация посмотрит на старый retryable-исход и
+  разрешит лишний запуск;
+- *следующий круг той же кампании* — когда автор ничего не исправил
+  (`rejected`/`wont_fix` по всем findings), новой авторской ревизии нет, и
+  `fix_check` идёт по той же. Требовать здесь совпадения `round_id` было бы
+  прямым нарушением Q50 и правила памяти линии: внутри кампании линия
+  продолжает свою сессию из круга в круг.
 
-Отдельной ссылки «retry вот этой попытки» в схеме нет: пятёрка координат
-различает продолжение от новой работы точнее, чем это сделала бы одна ссылка.
-Если позже понадобится различать логические цепочки внутри одного назначения,
-появится `step_attempt.retry_of_id`.
+**Незаконно.** Вторая линия с той же фактической парой, попытка вытесненного
+поколения слота, повтор поверх уже успешной работы **этого же круга**. При
+отказе откатывается вся транзакция, включая только что созданную попытку: иначе
+в базе останется attempt без допуска, и recovery увидит осиротевшую запись.
+
+Отдельной ссылки `retry_of_id` в схеме нет: координаты попытки плюс правило
+«последняя по `id`» различают продолжение и новую работу. Если цепочки повторов
+внутри одного назначения понадобится разбирать точнее, ссылка появится — но
+тогда как осознанное расширение, а не как заплатка к неопределённому «предыдущая
+попытка».
 
 Из membership-семантики следует и формулировка инварианта в T1.3: не «вторая
 запись отвергается», а **«дубля не появляется»**. `UNIQUE` не запрещает
@@ -1977,6 +2040,21 @@ CREATE TABLE run_profile_resolution (
   -- Под FK из reviewer_exposure: пара берётся только отсюда.
   UNIQUE (run_id, profile_id, provider, model)
 );
+
+-- Резолвинг однократен по определению, а теперь он ещё и единственный
+-- источник пары provider+model для roster: правка строки молча меняла бы
+-- исполнителя линии без нового поколения и без ответа человека.
+CREATE TRIGGER trg_profile_resolution_immutable
+BEFORE UPDATE ON run_profile_resolution
+BEGIN
+  SELECT RAISE(ABORT, 'run_profile_resolution is immutable');
+END;
+
+CREATE TRIGGER trg_profile_resolution_no_delete
+BEFORE DELETE ON run_profile_resolution
+BEGIN
+  SELECT RAISE(ABORT, 'run_profile_resolution rows are never deleted');
+END;
 ```
 
 **Автор ревизии не может быть её ревьюером — и это отдельное правило, а не
@@ -2432,7 +2510,7 @@ CREATE TABLE verification_run (
 CREATE INDEX ix_stage_by_branch     ON stage_execution (branch_id, state);
 CREATE INDEX ix_attempt_by_stage    ON step_attempt (stage_id, role);
 CREATE INDEX ix_attempt_running     ON step_attempt (run_id) WHERE outcome IS NULL;
-CREATE INDEX ix_attempt_by_round    ON step_attempt (round_id, lane_id, role);
+CREATE INDEX ix_attempt_by_round    ON step_attempt (round_id, lane_assignment_id, role);
 CREATE INDEX ix_campaign_by_stage   ON review_campaign (stage_id, state);
 CREATE INDEX ix_campaign_open       ON review_campaign (run_id) WHERE closed_at IS NULL;
 CREATE INDEX ix_finding_by_subject  ON finding (subject_id);
@@ -2450,7 +2528,9 @@ CREATE INDEX ix_dep_child           ON task_dependency (child_task_id);
 незакрытых родителей.
 
 `ix_attempt_by_round` — под lane-participation gate §5.2: он выполняется перед
-каждым `review_round.result` круга `discovery` и перед spawn reconciler.
+каждым `review_round.result` круга `discovery` и перед spawn reconciler. Ключ
+идёт по `lane_assignment_id`, а не по слоту, потому что в зачёт входит работа
+именно действующего исполнителя.
 
 ```sql
 -- Готовые задачи.
@@ -3078,8 +3158,11 @@ review_campaign SET expected_lane_count = 1` подгоняет заявленн
 `attempt_id`), журнал попыток остаётся в `step_attempt`.
 
 Составных FK в итоге пять, и последние два важнее остальных. Первые три
-связывают строку допуска с предметом кампании, ревизией предмета и попыткой той
-же кампании и прогона. Но они не мешали записать допуск на пару
+связывают строку допуска с предметом кампании, попыткой той же кампании и
+прогона и — главное — с **фактически переданной ревизией**: прежний ключ на
+`review_subject(id, revision)` разрешал только исходную ревизию предмета и тем
+самым запрещал штатный `fix_check`, где линия проверяет `output_sha` правки
+автора. Но они не мешали записать допуск на пару
 `anthropic/opus`, ссылаясь на попытку профиля, который резолвится в
 `openai/gpt`, — а свежесть считается именно по паре, и такая строка сделала бы
 одну модель ложно свежей, а другую ложно использованной. Поэтому в exposure
@@ -3095,11 +3178,11 @@ review_campaign SET expected_lane_count = 1` подгоняет заявленн
 передать несогласованные поля больше нельзя. Строки самого допуска стали
 append-only (два триггера): удалить или поправить их значило бы вернуть уже
 видевшую модель в пул свежих. Безусловный `INSERT OR IGNORE` запрещён; при
-конфликте существующая строка сверяется, а допустимыми продолжениями остаются
-только два: повтор той же работы — совпадение по
-`(campaign_id, round_id, lane_id, lane_assignment_id, role)` при отсутствии
-успешной попытки и предыдущем исходе из `contract_error`, `transient`, `hung`,
-`interrupted` — и reconciler того же круга.
+конфликте существующая строка сверяется, а допустимы ровно два продолжения:
+попытка **действующего** назначения того же слота в той же кампании — сюда
+попадают и retry в круге, и следующий круг по той же ревизии, когда автор ничего
+не исправил, — и reconciler той же кампании и ревизии. Требовать совпадения
+`round_id` нельзя: это запрещало бы штатный `fix_check` и противоречило Q50.
 
 ### Что было неверно в первой редакции этого документа
 
