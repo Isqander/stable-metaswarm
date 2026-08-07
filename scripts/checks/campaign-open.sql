@@ -417,12 +417,12 @@ VALUES (1, 2, 'sha-2', 'openai', 'gpt', 2, 404, 'p-b', 600);
 -- @step 23 допуск с чужой ревизией предмета
 -- @expect error FOREIGN KEY
 INSERT INTO reviewer_exposure(run_id, subject_id, revision, provider, model, campaign_id, first_attempt_id, profile_id, created_at)
-VALUES (1, 2, 'sha-1', 'openai', 'gpt', 2, 1, 'p-a', 600);
+VALUES (1, 2, 'sha-1', 'anthropic', 'opus', 2, 1, 'p-a', 600);
 
 -- @step 24 допуск на предмет, которого кампания не проверяет
 -- @expect error FOREIGN KEY
 INSERT INTO reviewer_exposure(run_id, subject_id, revision, provider, model, campaign_id, first_attempt_id, profile_id, created_at)
-VALUES (1, 1, 'sha-1', 'openai', 'gpt', 2, 1, 'p-a', 600);
+VALUES (1, 1, 'sha-2', 'anthropic', 'opus', 2, 1, 'p-a', 600);
 
 -- @step 25 профиль допуска не тот, которым исполнялась попытка
 -- @expect error FOREIGN KEY
@@ -442,7 +442,7 @@ VALUES (2, 1, 7, 'reviewer', 1, 1, 2, 2, 'p-b', 'sha-1', NULL);
 -- @step 27 попытка допуска принадлежит другой кампании
 -- @expect error FOREIGN KEY
 INSERT INTO reviewer_exposure(run_id, subject_id, revision, provider, model, campaign_id, first_attempt_id, profile_id, created_at)
-VALUES (1, 2, 'sha-2', 'openai', 'gpt', 2, 2, 'p-b', 600);
+VALUES (1, 2, 'sha-1', 'openai', 'gpt', 2, 2, 'p-b', 600);
 
 -- Штатный путь 1: reconciler наследует профиль линии 0 — та же пара.
 INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,
@@ -510,7 +510,7 @@ SELECT revision FROM reviewer_exposure
 -- @step 32e допуск на ревизию, которой попытка не получала
 -- @expect error FOREIGN KEY
 INSERT INTO reviewer_exposure(run_id, subject_id, revision, provider, model, campaign_id, first_attempt_id, profile_id, created_at)
-VALUES (1, 2, 'sha-2-fix9', 'openai', 'gpt', 2, 6, 'p-a', 800);
+VALUES (1, 2, 'sha-2-fix9', 'anthropic', 'opus', 2, 6, 'p-a', 800);
 
 -- @step 32f UPDATE резолвинга профилей: пара исполнителя не меняется задним числом
 -- @expect error immutable

@@ -261,15 +261,17 @@ VALUES (7, 'reviewer', 1, 1, 2, 2, 'p-b', NULL);
 
 -- @step 02 lane-participation: незавершённая линия держит круг discovery
 -- @expect rows-json [[2]]
-SELECT er.lane_id FROM review_round rr
-  JOIN effective_roster er ON er.campaign_id = rr.campaign_id
+SELECT l.id FROM review_round rr
+  JOIN review_lane l ON l.campaign_id = rr.campaign_id
  WHERE rr.id = 1 AND rr.kind = 'discovery'
    AND NOT EXISTS (SELECT 1 FROM lane_waiver w
                     WHERE w.campaign_id = rr.campaign_id AND w.round_no = rr.round_no
-                      AND w.lane_id = er.lane_id)
-   AND NOT EXISTS (SELECT 1 FROM step_attempt a
-                    WHERE a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
-                      AND a.role = 'reviewer' AND a.outcome = 'succeeded');
+                      AND w.lane_id = l.id)
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.lane_id = l.id);
 
 -- @step 03 вторая активная попытка того же слота
 -- @expect error ux_attempt_active
@@ -401,15 +403,17 @@ VALUES (7, 'reviewer', 1, 1, 2, 2, 'p-b', 'succeeded');
 
 -- @step 28 работа вытесненного поколения круг не закрывает
 -- @expect rows-json [[2]]
-SELECT er.lane_id FROM review_round rr
-  JOIN effective_roster er ON er.campaign_id = rr.campaign_id
+SELECT l.id FROM review_round rr
+  JOIN review_lane l ON l.campaign_id = rr.campaign_id
  WHERE rr.id = 1 AND rr.kind = 'discovery'
    AND NOT EXISTS (SELECT 1 FROM lane_waiver w
                     WHERE w.campaign_id = rr.campaign_id AND w.round_no = rr.round_no
-                      AND w.lane_id = er.lane_id)
-   AND NOT EXISTS (SELECT 1 FROM step_attempt a
-                    WHERE a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
-                      AND a.role = 'reviewer' AND a.outcome = 'succeeded');
+                      AND w.lane_id = l.id)
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.lane_id = l.id);
 
 -- Теперь работу сдаёт текущий исполнитель слота.
 INSERT INTO step_attempt(stage_id, role, campaign_id, round_id, lane_id, lane_assignment_id, profile_id, outcome)
@@ -417,39 +421,45 @@ VALUES (7, 'reviewer', 1, 1, 2, 5, 'p-e', 'succeeded');
 
 -- @step 29 lane-participation: после работы заменившего исполнителя гейт пуст
 -- @expect empty
-SELECT er.lane_id FROM review_round rr
-  JOIN effective_roster er ON er.campaign_id = rr.campaign_id
+SELECT l.id FROM review_round rr
+  JOIN review_lane l ON l.campaign_id = rr.campaign_id
  WHERE rr.id = 1 AND rr.kind = 'discovery'
    AND NOT EXISTS (SELECT 1 FROM lane_waiver w
                     WHERE w.campaign_id = rr.campaign_id AND w.round_no = rr.round_no
-                      AND w.lane_id = er.lane_id)
-   AND NOT EXISTS (SELECT 1 FROM step_attempt a
-                    WHERE a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
-                      AND a.role = 'reviewer' AND a.outcome = 'succeeded');
+                      AND w.lane_id = l.id)
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.lane_id = l.id);
 
 -- @step 30 в fix_check участия всех линий не требуется: отвечают владельцы
 -- @expect empty
-SELECT er.lane_id FROM review_round rr
-  JOIN effective_roster er ON er.campaign_id = rr.campaign_id
+SELECT l.id FROM review_round rr
+  JOIN review_lane l ON l.campaign_id = rr.campaign_id
  WHERE rr.id = 2 AND rr.kind = 'discovery'
    AND NOT EXISTS (SELECT 1 FROM lane_waiver w
                     WHERE w.campaign_id = rr.campaign_id AND w.round_no = rr.round_no
-                      AND w.lane_id = er.lane_id)
-   AND NOT EXISTS (SELECT 1 FROM step_attempt a
-                    WHERE a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
-                      AND a.role = 'reviewer' AND a.outcome = 'succeeded');
+                      AND w.lane_id = l.id)
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.lane_id = l.id);
 
 -- @step 31 тот же запрос без фильтра по kind закрыть fix_check не дал бы
 -- @expect rows=2
-SELECT er.lane_id FROM review_round rr
-  JOIN effective_roster er ON er.campaign_id = rr.campaign_id
+SELECT l.id FROM review_round rr
+  JOIN review_lane l ON l.campaign_id = rr.campaign_id
  WHERE rr.id = 2
    AND NOT EXISTS (SELECT 1 FROM lane_waiver w
                     WHERE w.campaign_id = rr.campaign_id AND w.round_no = rr.round_no
-                      AND w.lane_id = er.lane_id)
-   AND NOT EXISTS (SELECT 1 FROM step_attempt a
-                    WHERE a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
-                      AND a.role = 'reviewer' AND a.outcome = 'succeeded');
+                      AND w.lane_id = l.id)
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.lane_id = l.id);
 
 -- Кампания 2: слот 3 отработал, слот 4 отпущен waiver'ом (ответ 2).
 INSERT INTO step_attempt(stage_id, role, campaign_id, round_id, lane_id, lane_assignment_id, profile_id, outcome)
@@ -459,31 +469,37 @@ VALUES (2, 1, 4, 2, 1, 300);
 
 -- @step 32 lane-participation: waiver заменяет работу линии
 -- @expect empty
-SELECT er.lane_id FROM review_round rr
-  JOIN effective_roster er ON er.campaign_id = rr.campaign_id
+SELECT l.id FROM review_round rr
+  JOIN review_lane l ON l.campaign_id = rr.campaign_id
  WHERE rr.id = 3 AND rr.kind = 'discovery'
    AND NOT EXISTS (SELECT 1 FROM lane_waiver w
                     WHERE w.campaign_id = rr.campaign_id AND w.round_no = rr.round_no
-                      AND w.lane_id = er.lane_id)
-   AND NOT EXISTS (SELECT 1 FROM step_attempt a
-                    WHERE a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
-                      AND a.role = 'reviewer' AND a.outcome = 'succeeded');
+                      AND w.lane_id = l.id)
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.lane_id = l.id);
 
 -- @step 33 минимум одного мнения: в кампании 2 оно есть
 -- @expect empty
 SELECT rr.id FROM review_round rr
  WHERE rr.id = 3 AND rr.kind = 'discovery'
-   AND NOT EXISTS (SELECT 1 FROM step_attempt a
-                    WHERE a.round_id = rr.id AND a.role = 'reviewer'
-                      AND a.outcome = 'succeeded');
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.campaign_id = rr.campaign_id);
 
 -- @step 34 тот же запрос на пустом fix_check нарушения не даёт
 -- @expect empty
 SELECT rr.id FROM review_round rr
  WHERE rr.id = 2 AND rr.kind = 'discovery'
-   AND NOT EXISTS (SELECT 1 FROM step_attempt a
-                    WHERE a.round_id = rr.id AND a.role = 'reviewer'
-                      AND a.outcome = 'succeeded');
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.campaign_id = rr.campaign_id);
 
 -- @step 35 waiver кампании 2 на слот кампании 1
 -- @expect error FOREIGN KEY
@@ -532,23 +548,27 @@ UPDATE step_attempt SET outcome = 'failed'
 
 -- @step 43 lane-participation пропускает круг вообще без мнений
 -- @expect empty
-SELECT er.lane_id FROM review_round rr
-  JOIN effective_roster er ON er.campaign_id = rr.campaign_id
+SELECT l.id FROM review_round rr
+  JOIN review_lane l ON l.campaign_id = rr.campaign_id
  WHERE rr.id = 3 AND rr.kind = 'discovery'
    AND NOT EXISTS (SELECT 1 FROM lane_waiver w
                     WHERE w.campaign_id = rr.campaign_id AND w.round_no = rr.round_no
-                      AND w.lane_id = er.lane_id)
-   AND NOT EXISTS (SELECT 1 FROM step_attempt a
-                    WHERE a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
-                      AND a.role = 'reviewer' AND a.outcome = 'succeeded');
+                      AND w.lane_id = l.id)
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.lane_id = l.id);
 
 -- @step 44 и потому нужен отдельный запрос: он такой круг ловит
 -- @expect rows-json [[3]]
 SELECT rr.id FROM review_round rr
  WHERE rr.id = 3 AND rr.kind = 'discovery'
-   AND NOT EXISTS (SELECT 1 FROM step_attempt a
-                    WHERE a.round_id = rr.id AND a.role = 'reviewer'
-                      AND a.outcome = 'succeeded');
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.campaign_id = rr.campaign_id);
 
 -- Кампания 4 существует только ради следующего шага.
 INSERT INTO review_campaign(id, run_id, stage_id, expected_lane_count) VALUES (4, 1, 10, 1);
@@ -589,6 +609,53 @@ SELECT rr.campaign_id FROM review_round rr
  WHERE rr.id = 4 AND rr.kind = 'discovery'
    AND (SELECT COUNT(*) FROM effective_roster er
          WHERE er.campaign_id = c.id) <> c.expected_lane_count;
+
+-- Кампания 5: слот заменён, вытесненное поколение успело ответить,
+-- а действующее отпущено waiver'ом. Мнений по факту нет.
+INSERT INTO review_campaign(id, run_id, stage_id, expected_lane_count) VALUES (5, 1, 11, 1);
+INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES (8, 5, 1, 0);
+INSERT INTO lane_assignment(id, lane_id, run_id, generation, profile_id, event_id, assigned_at)
+VALUES (7, 8, 1, 1, 'p-a', 1, 100);
+INSERT INTO lane_assignment(id, lane_id, run_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
+VALUES (8, 8, 1, 2, 'p-b', 7, 5, 1, 200);
+INSERT INTO review_round(id, campaign_id, round_no, kind, preceding_revision_id)
+VALUES (5, 5, 1, 'discovery', NULL);
+INSERT INTO step_attempt(stage_id, role, campaign_id, round_id, lane_id, lane_assignment_id, profile_id, outcome)
+VALUES (11, 'reviewer', 5, 5, 8, 7, 'p-a', 'succeeded');
+INSERT INTO lane_waiver(campaign_id, round_no, lane_id, human_answer_id, event_id, created_at)
+VALUES (5, 1, 8, 6, 1, 300);
+
+-- @step 48a участие: waiver закрывает слот, поэтому первый запрос пуст
+-- @expect empty
+SELECT l.id FROM review_round rr
+  JOIN review_lane l ON l.campaign_id = rr.campaign_id
+ WHERE rr.id = 5 AND rr.kind = 'discovery'
+   AND NOT EXISTS (SELECT 1 FROM lane_waiver w
+                    WHERE w.campaign_id = rr.campaign_id AND w.round_no = rr.round_no
+                      AND w.lane_id = l.id)
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.lane_id = l.id);
+
+-- @step 48b мнение вытесненного поколения не считается мнением круга
+-- @expect rows-json [[5]]
+SELECT rr.id FROM review_round rr
+ WHERE rr.id = 5 AND rr.kind = 'discovery'
+   AND NOT EXISTS (SELECT 1 FROM effective_roster er
+                     JOIN step_attempt a
+                          ON a.round_id = rr.id AND a.lane_assignment_id = er.assignment_id
+                         AND a.role = 'reviewer' AND a.outcome = 'succeeded'
+                    WHERE er.campaign_id = rr.campaign_id);
+
+-- @step 48c а старая форма запроса такой круг пропускала
+-- @expect empty
+SELECT rr.id FROM review_round rr
+ WHERE rr.id = 5 AND rr.kind = 'discovery'
+   AND NOT EXISTS (SELECT 1 FROM step_attempt a
+                    WHERE a.round_id = rr.id AND a.role = 'reviewer'
+                      AND a.outcome = 'succeeded');
 
 -- @step 48 foreign_key_check
 -- @expect empty
