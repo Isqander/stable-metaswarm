@@ -148,7 +148,8 @@ CREATE TABLE step_attempt (
   FOREIGN KEY (campaign_id, round_id) REFERENCES review_round(campaign_id, id),
   FOREIGN KEY (campaign_id, lane_id)  REFERENCES review_lane(campaign_id, id),
   FOREIGN KEY (lane_assignment_id, lane_id, profile_id)
-      REFERENCES lane_assignment(id, lane_id, profile_id)
+      REFERENCES lane_assignment(id, lane_id, profile_id),
+  CHECK (role NOT IN ('reviewer', 'reconciler') OR subject_revision IS NOT NULL)
 );
 
 CREATE UNIQUE INDEX ux_attempt_id_campaign ON step_attempt (id, campaign_id);
@@ -317,7 +318,10 @@ SELECT c.id FROM review_campaign c
                       AND NOT EXISTS (SELECT 1 FROM lane_assignment a
                                        WHERE a.lane_id = l.id)));
 
--- @step 09 гейт участия по составу ловит тот же недобор перед закрытием круга
+-- @step 09 recovery-сверка состава ловит тот же недобор.
+-- Нормативный третий запрос гейта считает effective_roster, а не слоты
+-- (db-schema.md §5.2); его форма проверена в roster-model.sql, шаг 47 —
+-- здесь нет представления, потому что стаб не моделирует вытеснение поколений.
 -- @expect rows-json [[2]]
 SELECT rr.campaign_id FROM review_round rr
   JOIN review_campaign c ON c.id = rr.campaign_id
@@ -519,6 +523,26 @@ UPDATE run_profile_resolution SET model = 'sonnet' WHERE profile_id = 'p-a';
 -- @step 32g DELETE резолвинга профилей
 -- @expect error never deleted
 DELETE FROM run_profile_resolution WHERE profile_id = 'p-b';
+
+-- Второй прогон и новая ревизия — чтобы проверить последний непокрытый ключ
+-- допуска, не задев уникальность.
+INSERT INTO run DEFAULT VALUES;
+INSERT INTO run_profile_resolution(run_id, profile_id, provider, model, resolved_at)
+VALUES (2, 'p-a', 'anthropic', 'opus', 10);
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,
+                         lane_assignment_id, profile_id, subject_revision, outcome)
+VALUES (7, 1, 8, 'reviewer', 2, 4, 3, 3, 'p-a', 'sha-2-fix2', 'succeeded');
+
+-- @step 32h допуск, у которого прогон не совпадает с прогоном попытки
+-- @expect error FOREIGN KEY
+INSERT INTO reviewer_exposure(run_id, subject_id, revision, provider, model, campaign_id, first_attempt_id, profile_id, created_at)
+VALUES (2, 2, 'sha-2-fix2', 'anthropic', 'opus', 2, 7, 'p-a', 800);
+
+-- @step 32i попытка ревьюера без ревизии предмета
+-- @expect error CHECK
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,
+                         lane_assignment_id, profile_id, subject_revision, outcome)
+VALUES (8, 1, 8, 'reviewer', 2, 4, 3, 3, 'p-a', NULL, NULL);
 
 -- @step 33 foreign_key_check
 -- @expect empty
