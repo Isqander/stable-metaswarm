@@ -28,7 +28,10 @@
 возврата 1, поэтому проверку можно ставить в конвейер, а не читать глазами.
 
 Использование:
-    python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql
+    python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql [ещё.sql …]
+
+Файлов можно передать несколько: каждый прогоняется в своей базе, код возврата
+ненулевой, если провалился хотя бы один.
 """
 
 import json
@@ -158,7 +161,12 @@ def main(path: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(2)
-    sys.exit(main(sys.argv[1]))
+    codes = []
+    for path in sys.argv[1:]:
+        if len(sys.argv) > 2:
+            print("=== %s" % path)
+        codes.append(main(path))
+    sys.exit(max(codes))

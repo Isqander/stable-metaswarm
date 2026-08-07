@@ -22,7 +22,9 @@ cross-campaign ссылки, формы строки попытки по рол�
 открытию кампании, матрице переходов, неизменяемости снимка и допуску
 ревьюера, включая штатный `fix_check` по новой ревизии. Оба воспроизводятся и
 падают ненулевым кодом:
-`python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql`.
+`python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
+можно передать несколько). Третий прогон, `scope-keys.sql`, — 22 сценария на
+составные ключи scope из §5.3.1.
 
 Оба прогона доказывают **констрейнты и cardinality** — какие строки база
 принимает, а какие нет. Атомарность «переход + событие», поведение при падении
@@ -60,8 +62,8 @@ DDL. Документ отвечает на вопрос, на который р
 | Порядок работ | `task-plans.md` |
 
 В конце — §14: список мест, где проектирование **уточнило или дополнило**
-решение. Читать обязательно: там двадцать пять уточнений с обоснованием, включая
-одну необязательную возможность.
+решение. Читать обязательно: там двадцать шесть уточнений с обоснованием,
+включая одну необязательную возможность.
 
 ---
 
@@ -309,6 +311,7 @@ CREATE TABLE branch (
   state      TEXT    NOT NULL REFERENCES branch_state(state),
   created_at INTEGER NOT NULL,
   UNIQUE (run_id, public_id),
+  UNIQUE (id, run_id),                              -- под scope-FK стадии
   CHECK ((kind = 'task') = (task_id IS NOT NULL))
 );
 
@@ -323,7 +326,10 @@ CREATE TABLE stage_execution (
   severity_threshold   TEXT    NOT NULL REFERENCES severity_scale(severity),
   started_at           INTEGER,
   finished_at          INTEGER,
-  UNIQUE (branch_id, stage_key, ordinal)
+  UNIQUE (branch_id, stage_key, ordinal),
+  UNIQUE (id, run_id),                              -- под scope-FK попытки
+  -- Стадия принадлежит прогону своей ветки, а не любому.
+  FOREIGN KEY (branch_id, run_id) REFERENCES branch(id, run_id)
 );
 ```
 
@@ -372,6 +378,7 @@ CREATE TABLE step_attempt (
   -- Все review-координаты попытки — из одной кампании и одной стадии.
   -- Независимые FK этого не дают: круг кампании A со слотом кампании B
   -- проходит каждый из них по отдельности.
+  FOREIGN KEY (stage_id, run_id)            REFERENCES stage_execution(id, run_id),
   FOREIGN KEY (stage_id, campaign_id)       REFERENCES review_campaign(stage_id, id),
   FOREIGN KEY (campaign_id, round_id)       REFERENCES review_round(campaign_id, id),
   FOREIGN KEY (campaign_id, lane_id)        REFERENCES review_lane(campaign_id, id),
@@ -405,6 +412,7 @@ CREATE UNIQUE INDEX ux_attempt_id_campaign ON step_attempt (id, campaign_id);
 CREATE UNIQUE INDEX ux_attempt_id_run      ON step_attempt (id, run_id);
 CREATE UNIQUE INDEX ux_attempt_id_profile  ON step_attempt (id, profile_id);
 CREATE UNIQUE INDEX ux_attempt_id_revision ON step_attempt (id, subject_revision);
+CREATE UNIQUE INDEX ux_attempt_id_stage    ON step_attempt (id, stage_id);
 
 -- Инвариант 19: не более одной активной попытки на шаг или линию.
 CREATE UNIQUE INDEX ux_attempt_active
@@ -1103,6 +1111,7 @@ CREATE TABLE review_round (
 CREATE TABLE author_revision (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id          INTEGER NOT NULL REFERENCES review_campaign(id),
+  stage_id             INTEGER NOT NULL REFERENCES stage_execution(id),
   revision_no          INTEGER NOT NULL,
   attempt_id           INTEGER NOT NULL,
   attempt_role         TEXT    NOT NULL,
@@ -1116,7 +1125,12 @@ CREATE TABLE author_revision (
   CHECK (attempt_role = 'author'),
   CHECK (attempt_outcome = 'succeeded'),
   FOREIGN KEY (attempt_id, attempt_role)    REFERENCES step_attempt(id, role),
-  FOREIGN KEY (attempt_id, attempt_outcome) REFERENCES step_attempt(id, outcome)
+  FOREIGN KEY (attempt_id, attempt_outcome) REFERENCES step_attempt(id, outcome),
+  -- Авторская попытка — с той же стадии, что и кампания. Через campaign_id
+  -- это не выражается: у author-попытки review-координат нет по CHECK §4,
+  -- поэтому общий якорь — стадия.
+  FOREIGN KEY (stage_id, campaign_id)       REFERENCES review_campaign(stage_id, id),
+  FOREIGN KEY (attempt_id, stage_id)        REFERENCES step_attempt(id, stage_id)
 );
 ```
 
@@ -1305,6 +1319,16 @@ CREATE TABLE review_observation (
   dedup_key          TEXT    NOT NULL,
   created_at         INTEGER NOT NULL,
   UNIQUE (campaign_id, seq),
+  UNIQUE (id, campaign_id),                    -- под scope-FK личности
+  UNIQUE (id, revision),                       -- под scope-FK личности
+  -- Круг, слот, попытка и предмет — из той же кампании, а ревизия — та,
+  -- которую попытка реально получила. Независимые FK этого не дают:
+  -- наблюдение с кругом одной кампании и линией другой проходит их все.
+  FOREIGN KEY (campaign_id, round_id)  REFERENCES review_round(campaign_id, id),
+  FOREIGN KEY (campaign_id, lane_id)   REFERENCES review_lane(campaign_id, id),
+  FOREIGN KEY (campaign_id, subject_id) REFERENCES review_campaign(id, subject_id),
+  FOREIGN KEY (attempt_id, campaign_id) REFERENCES step_attempt(id, campaign_id),
+  FOREIGN KEY (attempt_id, revision)    REFERENCES step_attempt(id, subject_revision),
   -- Ровно одно из двух: своя оценка либо ссылка на прежнюю.
   CHECK ((severity_suggested IS NULL) <> (unchanged_from_id IS NULL)),
   -- Своя оценка = она же эффективная.
@@ -1413,6 +1437,47 @@ Target follow-up observation уже задан внешним `finding_id`, по
 кругах проверки исправления, которые ведёт владелец finding'а. Валидатор ответа
 знает фазу и требует разного — см. `agent-contracts.md` §3.
 
+### 5.3.1. Scope: где его держит база, а где код
+
+Ревью P1-A (C-06) потребовало по каждой связи явного выбора: составной FK,
+удаление дублирующей колонки либо честная переклассификация в «База + код» с
+перечнем запросов. Выбор сделан так.
+
+**Держит база — там, где scope-колонка в таблице уже есть.** Составными
+ключами замкнуты: стадия ↔ прогон её ветки; попытка ↔ прогон своей стадии;
+наблюдение ↔ круг, слот, предмет, попытка и ревизия своей кампании; личность ↔
+первая кампания, её круг, слот, наблюдение и ревизия; `finding_round` ↔ круг,
+слот-владелец и попытка ревьюера своей кампании; закрытие ↔ круг своей кампании;
+авторская правка ↔ стадия своей кампании; допуск ревьюера ↔ шесть ключей §5.7.
+Общий приём один: денормализованная scope-колонка плюс `UNIQUE (id, <scope>)` в
+родителе — тот же, что уже применён к `author_revision`.
+
+**Остаётся за кодом — там, где ключ потребовал бы новых колонок ради связи,
+которая и так проверяется запросом.** Таких мест четыре, и все четыре с
+перечисленными проверками:
+
+| Связь | Почему не FK | Чем держится |
+|---|---|---|
+| `finding_observation_link`: наблюдение и finding одного прогона | Потребовало бы `campaign_id` и `run_id` в таблице из пяти колонок, где `observation_id` — PK | Reconciliation работает внутри кампании и берёт ledger по scope прогона; recovery-запрос ниже |
+| `finding_round.author_attempt_id` ↔ стадия кампании | У автора нет review-координат (CHECK §4), общий якорь — стадия, а `stage_id` в `finding_round` не хранится | Strict-issued гейт §5.2 сравнивает `d.stage_id = c.stage_id` явно |
+| `author_revision.artifact_revision_id` ↔ `logical_path` предмета | `logical_path` — свойство артефакта, а не ревизии кампании; ключ потребовал бы протащить путь в правку | Предусловие `create_attempt_and_reserve_exposure()` в T1.18, AC записан в графе |
+| Цикл в дереве `review_subject` | Многозвенный цикл констрейнтом не выражается | Проверка при вставке в той же транзакции (§5.1) |
+
+```sql
+-- Recovery audit: связь между наблюдением и личностью разных прогонов.
+-- Должен вернуть 0 строк.
+SELECT l.observation_id
+  FROM finding_observation_link l
+  JOIN review_observation o ON o.id = l.observation_id
+  JOIN review_campaign    c ON c.id = o.campaign_id
+  JOIN finding            f ON f.id = l.finding_id
+ WHERE f.run_id <> c.run_id;
+```
+
+Разница между двумя колонками таблицы важна: **утверждение, закрытое ключом,
+нельзя нарушить и потому незачем проверять; утверждение, оставленное коду,
+обязано иметь названный запрос** — иначе это не выбор, а забывчивость.
+
 ### 5.4. Личность и связь
 
 ```sql
@@ -1434,6 +1499,18 @@ CREATE TABLE finding (
   created_at           INTEGER NOT NULL,
   UNIQUE (run_id, public_id),
   UNIQUE (first_observation_id),
+  UNIQUE (id, run_id),                         -- под scope-запросы связи
+  -- Вся «первая» пятёрка принадлежит одной кампании одного прогона.
+  FOREIGN KEY (first_campaign_id, run_id)      REFERENCES review_campaign(id, run_id),
+  FOREIGN KEY (first_campaign_id, subject_id)  REFERENCES review_campaign(id, subject_id),
+  FOREIGN KEY (first_campaign_id, first_round_id)
+      REFERENCES review_round(campaign_id, id),
+  FOREIGN KEY (first_campaign_id, first_owner_lane_id)
+      REFERENCES review_lane(campaign_id, id),
+  FOREIGN KEY (first_observation_id, first_campaign_id)
+      REFERENCES review_observation(id, campaign_id),
+  FOREIGN KEY (first_observation_id, first_revision)
+      REFERENCES review_observation(id, revision),
   CHECK (title_authority = 'runtime' OR title_changed_reason IS NOT NULL)
 );
 ```
@@ -1532,6 +1609,15 @@ CREATE TABLE finding_round (
   reviewer_attempt_id INTEGER REFERENCES step_attempt(id),
   decided_at          INTEGER,
   UNIQUE (campaign_id, finding_id, round_no),
+  -- C-06a: без этого ключа строка ссылается на round_no, существующий только
+  -- в другой кампании, и при этом ИСЧЕЗАЕТ из strict-issued гейта — он
+  -- строится на INNER JOIN, так что orphan не диагностируется, а живёт.
+  FOREIGN KEY (campaign_id, round_no)
+      REFERENCES review_round(campaign_id, round_no),
+  FOREIGN KEY (campaign_id, owner_lane_id)
+      REFERENCES review_lane(campaign_id, id),
+  FOREIGN KEY (reviewer_attempt_id, campaign_id)
+      REFERENCES step_attempt(id, campaign_id),
   -- post_check появился после проверки: авторского и reviewer-ответа ещё нет.
   CHECK (
     entry_kind <> 'post_check'
@@ -1578,6 +1664,15 @@ CREATE INDEX ix_finding_round_finding ON finding_round (finding_id);
 объявлении, либо явно проверена на NULL внутри самого CHECK.** Иначе констрейнт
 молча превращается в декорацию именно на тех строках, ради которых написан.
 
+**Про составной ключ `(campaign_id, round_no)` — это C-06a, и он важнее, чем
+кажется.** `round_no` не глобален: он уникален только внутри кампании. Без
+ключа строка `finding_round` могла ссылаться на номер круга, существующий лишь
+в другой кампании, — и такая строка не просто существовала, а **выпадала** из
+strict-issued гейта, потому что он построен на `INNER JOIN review_round`.
+Ошибка, ради поимки которой гейт написан, делала гейт слепым к самой себе.
+Теперь orphan не вставляется, и слепота INNER JOIN перестаёт быть проблемой:
+диагностировать нечего.
+
 Инвариант 21 (`UNIQUE(campaign_id, finding_id, round_no)`) держится напрямую.
 Инвариант 11 («решение выносит владелец круга, и оно единственное») — тем, что
 `reviewer_decision` одна колонка одной строки: второго решения записать некуда.
@@ -1620,6 +1715,10 @@ CREATE TABLE finding_resolution (
   event_id               INTEGER NOT NULL REFERENCES run_event(id),
   created_at             INTEGER NOT NULL,
   UNIQUE (finding_id, seq),
+  -- Круг закрытия — из той же кампании; при round_no IS NULL (закрытие
+  -- решением человека вне круга) составной FK не проверяется, и это верно.
+  FOREIGN KEY (campaign_id, round_no)
+      REFERENCES review_round(campaign_id, round_no),
   -- Кто закрыл — однозначно следует из того, чем закрыли.
   -- ELSE обязателен: без него неизвестное значение даёт NULL, а NULL проходит.
   CHECK (resolution_authority = CASE resolution
@@ -2622,7 +2721,7 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 18 | Один экземпляр сервиса на каталог | **ОС** | `flock` на файле + lease с heartbeat |
 | 19 | Не более одной активной попытки на линию или шаг | **База** | Partial unique index `ux_attempt_active`; ключ — слот, поэтому заменённое и заменившее поколения не могут работать параллельно |
 | 20 | Один принятый ответ; `UNIQUE(transport, update_id)` | **База** | `UNIQUE(question_id)` в `human_answer`; PK в `telegram_inbox` |
-| 21 | FK между кампанией, кругом, замечанием, наблюдением, попыткой; `UNIQUE(campaign_id, finding_id, round_no)` | **База** | FK, `entry_kind` FK и UNIQUE прямо в DDL |
+| 21 | FK между кампанией, кругом, замечанием, наблюдением, попыткой; `UNIQUE(campaign_id, finding_id, round_no)` | **База** | Составные FK §5.3.1 — связь с чужой кампанией, прогоном или стадией не вставляется; `entry_kind` FK и UNIQUE прямо в DDL |
 | 22 | Состояние `Run` вычисляется; branch blocker согласован с физическим состоянием ветки | **База + код** | `run_state` — представление; атомарная запись пары и три recovery-запроса §6.2 |
 | 23 | Нет self-edge, дублей, циклов; смысловой ID уникален | **База + код** | CHECK и PK; `UNIQUE(import_id, semantic_task_id)` + партиальный индекс на активную версию; цикл — обход внутри той же транзакции |
 | 24 | Пустая готовность без блокировки = `invalid_graph` | **Код** | Запрос §9, выполняется планировщиком и recovery audit |
@@ -2849,9 +2948,9 @@ INSERT INTO verification_status(status) VALUES ('green'),('red'),('error');
 
 ## 14. Уточнения к `decision.md`
 
-Проектирование и последующее ревью таск-планов дали двадцать пять уточнений:
-двадцать четыре места, где решение чего-то не учло, и одна возможность
-(пункт 5). Ни одно из принятых
+Проектирование и последующее ревью таск-планов дали двадцать шесть уточнений:
+двадцать пять мест, где решение чего-то не учло, и одна возможность (пункт 5).
+Ни одно из принятых
 решений не отменяется — но без этих уточнений часть из них нереализуема.
 
 **1. Четвёртый тип связи `reopening`.** §6.3 перечисляет три типа
@@ -3227,6 +3326,22 @@ append-only (два триггера): удалить или поправить 
 попадают и retry в круге, и следующий круг по той же ревизии, когда автор ничего
 не исправил, — и reconciler той же кампании и ревизии. Требовать совпадения
 `round_id` нельзя: это запрещало бы штатный `fix_check` и противоречило Q50.
+
+**26. Scope держался на независимых FK, а значит не держался.** Каждая ссылка
+проверялась по отдельности, поэтому `finding_round` могла указывать на
+`round_no`, существующий только в другой кампании, наблюдение — на круг одной
+кампании и линию другой, стадия — на ветку чужого прогона. Хуже всего первое:
+такая строка **выпадала** из strict-issued гейта, построенного на INNER JOIN, —
+то есть ошибка, ради поимки которой гейт написан, делала его слепым.
+
+Введены составные ключи по всему review-домену (§5.3.1) и по паре
+`branch → stage_execution → step_attempt`; общий приём — денормализованная
+scope-колонка плюс `UNIQUE (id, <scope>)` в родителе. Четыре связи осознанно
+оставлены коду, и у каждой назван запрос или предусловие: наблюдение ↔ личность
+разных прогонов, авторская попытка в `finding_round` через стадию,
+`logical_path` артефактной ревизии, цикл в дереве предметов. Разница
+зафиксирована прямо: закрытое ключом не нуждается в проверке, оставленное коду
+обязано иметь названный запрос.
 
 ### Что было неверно в первой редакции этого документа
 
