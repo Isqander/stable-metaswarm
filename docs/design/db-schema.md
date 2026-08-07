@@ -24,9 +24,10 @@ cross-campaign ссылки, формы строки попытки по рол�
 падают ненулевым кодом:
 `python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
 можно передать несколько). Третий прогон, `scope-keys.sql`, — 22 сценария на
-составные ключи scope из §5.3.1.
+составные ключи scope из §5.3.1: чужой прогон, чужая кампания и — самый
+тихий класс — своя кампания, но чужой круг или чужая линия.
 
-Оба прогона доказывают **констрейнты и cardinality** — какие строки база
+Все три прогона доказывают **констрейнты и cardinality** — какие строки база
 принимает, а какие нет. Атомарность «переход + событие», поведение при падении
 между операциями и контракты самих операций ими не проверяются: там нужны
 транзакции и код. Владельцы этих тестов разные: транзакционная механика —
@@ -413,6 +414,8 @@ CREATE UNIQUE INDEX ux_attempt_id_run      ON step_attempt (id, run_id);
 CREATE UNIQUE INDEX ux_attempt_id_profile  ON step_attempt (id, profile_id);
 CREATE UNIQUE INDEX ux_attempt_id_revision ON step_attempt (id, subject_revision);
 CREATE UNIQUE INDEX ux_attempt_id_stage    ON step_attempt (id, stage_id);
+CREATE UNIQUE INDEX ux_attempt_id_round    ON step_attempt (id, round_id);
+CREATE UNIQUE INDEX ux_attempt_id_lane     ON step_attempt (id, lane_id);
 
 -- Инвариант 19: не более одной активной попытки на шаг или линию.
 CREATE UNIQUE INDEX ux_attempt_active
@@ -518,6 +521,10 @@ CREATE TABLE review_subject (
   parent_subject_id INTEGER REFERENCES review_subject(id),
   created_at        INTEGER NOT NULL,
   UNIQUE (id, revision),                 -- под scope-FK из reviewer_exposure
+  UNIQUE (id, run_id),                   -- под scope-FK кампании и родителя
+  -- Вложенность не выходит за прогон: иначе рекурсия §5.1 смешает findings
+  -- разных запусков.
+  FOREIGN KEY (parent_subject_id, run_id) REFERENCES review_subject(id, run_id),
   CHECK (parent_subject_id IS NULL OR parent_subject_id <> id)
 );
 
@@ -566,6 +573,10 @@ CREATE TABLE review_campaign (
   UNIQUE (id, subject_id),                         -- под scope-FK из exposure
   UNIQUE (id, run_id),                             -- под scope-FK из review_lane
   CHECK (expected_lane_count >= 1),
+  -- Кампания — корень scope, и он обязан быть согласован в самом корне:
+  -- иначе все ключи ниже честно разнесут противоречие дальше.
+  FOREIGN KEY (stage_id, run_id)   REFERENCES stage_execution(id, run_id),
+  FOREIGN KEY (subject_id, run_id) REFERENCES review_subject(id, run_id),
   CHECK (
     (state IN ('closed_clean', 'closed_escalated', 'closed_cancelled'))
     = (closed_at IS NOT NULL)
@@ -1101,6 +1112,10 @@ CREATE TABLE review_round (
   closed_at   INTEGER,
   UNIQUE (campaign_id, round_no),
   UNIQUE (campaign_id, id),                        -- под scope-FK из step_attempt
+  UNIQUE (id, round_no),                           -- под scope-FK из finding_round
+  -- Правка, которую проверяет этот fix_check, — из той же кампании.
+  FOREIGN KEY (preceding_revision_id, campaign_id)
+      REFERENCES author_revision(id, campaign_id),
   CHECK ((kind = 'discovery') = (preceding_revision_id IS NULL)),
   CHECK ((result IS NULL) = (closed_at IS NULL))
 );
@@ -1122,6 +1137,8 @@ CREATE TABLE author_revision (
   completed_at         INTEGER NOT NULL,
   UNIQUE (campaign_id, revision_no),
   UNIQUE (attempt_id),
+  UNIQUE (id, campaign_id),                 -- под scope-FK круга
+
   CHECK (attempt_role = 'author'),
   CHECK (attempt_outcome = 'succeeded'),
   FOREIGN KEY (attempt_id, attempt_role)    REFERENCES step_attempt(id, role),
@@ -1232,6 +1249,7 @@ SELECT fr.finding_id
         OR a.role <> 'reviewer'
         OR a.outcome <> 'succeeded'
         OR a.stage_id <> c.stage_id
+        OR a.round_id <> rr.id
         OR a.lane_id <> fr.owner_lane_id);
 ```
 
@@ -1321,6 +1339,7 @@ CREATE TABLE review_observation (
   UNIQUE (campaign_id, seq),
   UNIQUE (id, campaign_id),                    -- под scope-FK личности
   UNIQUE (id, revision),                       -- под scope-FK личности
+  UNIQUE (id, round_id),                       -- под scope-FK личности
   -- Круг, слот, попытка и предмет — из той же кампании, а ревизия — та,
   -- которую попытка реально получила. Независимые FK этого не дают:
   -- наблюдение с кругом одной кампании и линией другой проходит их все.
@@ -1329,6 +1348,10 @@ CREATE TABLE review_observation (
   FOREIGN KEY (campaign_id, subject_id) REFERENCES review_campaign(id, subject_id),
   FOREIGN KEY (attempt_id, campaign_id) REFERENCES step_attempt(id, campaign_id),
   FOREIGN KEY (attempt_id, revision)    REFERENCES step_attempt(id, subject_revision),
+  -- Общей кампании мало: попытка обязана быть попыткой ИМЕННО этого круга и
+  -- этой линии, иначе наблюдение линии 0 приписывается работе линии 1.
+  FOREIGN KEY (attempt_id, round_id)    REFERENCES step_attempt(id, round_id),
+  FOREIGN KEY (attempt_id, lane_id)     REFERENCES step_attempt(id, lane_id),
   -- Ровно одно из двух: своя оценка либо ссылка на прежнюю.
   CHECK ((severity_suggested IS NULL) <> (unchanged_from_id IS NULL)),
   -- Своя оценка = она же эффективная.
@@ -1458,8 +1481,9 @@ Target follow-up observation уже задан внешним `finding_id`, по
 
 | Связь | Почему не FK | Чем держится |
 |---|---|---|
-| `finding_observation_link`: наблюдение и finding одного прогона | Потребовало бы `campaign_id` и `run_id` в таблице из пяти колонок, где `observation_id` — PK | Reconciliation работает внутри кампании и берёт ledger по scope прогона; recovery-запрос ниже |
+| `finding_observation_link`: finding того же прогона | `campaign_id` в таблице уже есть и закрывает наблюдение и решившую попытку; `run_id` пришлось бы тащить ради одной связи | Recovery-запрос ниже |
 | `finding_round.author_attempt_id` ↔ стадия кампании | У автора нет review-координат (CHECK §4), общий якорь — стадия, а `stage_id` в `finding_round` не хранится | Strict-issued гейт §5.2 сравнивает `d.stage_id = c.stage_id` явно |
+| Роль попытки в `finding_observation_link` | `role` в ключ не входит: связь решает reconciler либо reviewer, и различать их констрейнтом здесь незачем | Валидация на приёме + recovery-аудит T1.3 |
 | `author_revision.artifact_revision_id` ↔ `logical_path` предмета | `logical_path` — свойство артефакта, а не ревизии кампании; ключ потребовал бы протащить путь в правку | Предусловие `create_attempt_and_reserve_exposure()` в T1.18, AC записан в графе |
 | Цикл в дереве `review_subject` | Многозвенный цикл констрейнтом не выражается | Проверка при вставке в той же транзакции (§5.1) |
 
@@ -1511,6 +1535,10 @@ CREATE TABLE finding (
       REFERENCES review_observation(id, campaign_id),
   FOREIGN KEY (first_observation_id, first_revision)
       REFERENCES review_observation(id, revision),
+  -- Первый круг — тот, в котором сделано первое наблюдение, а не любой круг
+  -- той же кампании.
+  FOREIGN KEY (first_observation_id, first_round_id)
+      REFERENCES review_observation(id, round_id),
   CHECK (title_authority = 'runtime' OR title_changed_reason IS NOT NULL)
 );
 ```
@@ -1536,12 +1564,20 @@ SQLite. Единственный writer исключает гонку между
 ```sql
 CREATE TABLE finding_observation_link (
   observation_id        INTEGER PRIMARY KEY REFERENCES review_observation(id),
+  campaign_id           INTEGER NOT NULL REFERENCES review_campaign(id),
   finding_id            INTEGER NOT NULL REFERENCES finding(id),
   link_type             TEXT    NOT NULL REFERENCES link_type(link_type),
   decided_by_attempt_id INTEGER NOT NULL REFERENCES step_attempt(id),
   reason                TEXT,
   event_id              INTEGER NOT NULL REFERENCES run_event(id),
   created_at            INTEGER NOT NULL,
+  -- Наблюдение и решившая попытка — из одной кампании. Прогон finding при
+  -- этом сверяется запросом (§5.3.1): у link нет своего run_id, а тащить его
+  -- сюда ради одной связи дороже, чем проверить.
+  FOREIGN KEY (observation_id, campaign_id)
+      REFERENCES review_observation(id, campaign_id),
+  FOREIGN KEY (decided_by_attempt_id, campaign_id)
+      REFERENCES step_attempt(id, campaign_id),
   CHECK (link_type <> 'reopening' OR reason IS NOT NULL)
 );
 
@@ -1598,8 +1634,10 @@ target уже известен:
 CREATE TABLE finding_round (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id         INTEGER NOT NULL REFERENCES review_campaign(id),
+  run_id              INTEGER NOT NULL REFERENCES run(id),
   finding_id          INTEGER NOT NULL REFERENCES finding(id),
   round_no            INTEGER NOT NULL,
+  round_id            INTEGER NOT NULL REFERENCES review_round(id),
   owner_lane_id       INTEGER NOT NULL REFERENCES review_lane(id),
   entry_kind          TEXT    NOT NULL REFERENCES finding_round_entry_kind(entry_kind),
   disposition         TEXT REFERENCES disposition(value),
@@ -1614,10 +1652,24 @@ CREATE TABLE finding_round (
   -- строится на INNER JOIN, так что orphan не диагностируется, а живёт.
   FOREIGN KEY (campaign_id, round_no)
       REFERENCES review_round(campaign_id, round_no),
+  -- round_id и round_no обязаны быть одним и тем же кругом: два ключа порознь
+  -- этого не дают, третий связывает их между собой.
+  FOREIGN KEY (campaign_id, round_id)
+      REFERENCES review_round(campaign_id, id),
+  FOREIGN KEY (round_id, round_no)
+      REFERENCES review_round(id, round_no),
   FOREIGN KEY (campaign_id, owner_lane_id)
       REFERENCES review_lane(campaign_id, id),
+  -- Решение владельца — попытка ИМЕННО этого круга. Общей кампании мало:
+  -- успешное решение предыдущего круга закрывало бы текущий.
   FOREIGN KEY (reviewer_attempt_id, campaign_id)
       REFERENCES step_attempt(id, campaign_id),
+  FOREIGN KEY (reviewer_attempt_id, round_id)
+      REFERENCES step_attempt(id, round_id),
+  -- Finding и кампания — из одного прогона. Равенства предмета требовать
+  -- нельзя: финальная кампания законно работает с findings дочерних предметов.
+  FOREIGN KEY (finding_id, run_id)   REFERENCES finding(id, run_id),
+  FOREIGN KEY (campaign_id, run_id)  REFERENCES review_campaign(id, run_id),
   -- post_check появился после проверки: авторского и reviewer-ответа ещё нет.
   CHECK (
     entry_kind <> 'post_check'
@@ -1704,6 +1756,7 @@ CREATE TABLE resolution_kind (
 
 CREATE TABLE finding_resolution (
   id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id                 INTEGER NOT NULL REFERENCES run(id),
   finding_id             INTEGER NOT NULL REFERENCES finding(id),
   seq                    INTEGER NOT NULL,
   resolution             TEXT    NOT NULL REFERENCES resolution_kind(resolution),
@@ -1719,6 +1772,10 @@ CREATE TABLE finding_resolution (
   -- решением человека вне круга) составной FK не проверяется, и это верно.
   FOREIGN KEY (campaign_id, round_no)
       REFERENCES review_round(campaign_id, round_no),
+  -- Закрытие меняет вычисляемый статус finding, поэтому прогон обязан
+  -- совпадать: строка из чужого прогона иначе молча правит чужой статус.
+  FOREIGN KEY (finding_id, run_id)  REFERENCES finding(id, run_id),
+  FOREIGN KEY (campaign_id, run_id) REFERENCES review_campaign(id, run_id),
   -- Кто закрыл — однозначно следует из того, чем закрыли.
   -- ELSE обязателен: без него неизвестное значение даёт NULL, а NULL проходит.
   CHECK (resolution_authority = CASE resolution

@@ -155,6 +155,16 @@ def main(path: str) -> int:
             print("      %s" % problem)
         step.reset()
 
+    # Хвост файла: оборванный statement или директива без statement — это
+    # молча исчезнувший тест, а не «конец сценария».
+    if stmt.strip():
+        print("FAIL  оборванный statement в конце файла:")
+        print("      %s" % stmt.strip().splitlines()[0])
+        failed += 1
+    if step.expect is not None:
+        print("FAIL  @expect без statement: %s" % (step.name or "<без подписи>"))
+        failed += 1
+
     con.close()
     print("\nпройдено %d, провалено %d" % (passed, failed))
     return 1 if failed else 0
