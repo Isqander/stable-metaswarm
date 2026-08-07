@@ -30,12 +30,16 @@ CREATE TABLE review_subject (
 
 CREATE TABLE review_campaign (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  public_id  TEXT    NOT NULL UNIQUE,
   run_id     INTEGER NOT NULL REFERENCES run(id),
   stage_id   INTEGER NOT NULL,
   subject_id INTEGER NOT NULL REFERENCES review_subject(id),
   ordinal    INTEGER NOT NULL,
+  severity_threshold TEXT NOT NULL,
+  policy_version     TEXT NOT NULL,
   expected_lane_count INTEGER NOT NULL,
   state      TEXT    NOT NULL REFERENCES campaign_state(state),
+  opened_at  INTEGER NOT NULL,
   closed_at  INTEGER,
   UNIQUE (stage_id, ordinal),
   UNIQUE (stage_id, id),
@@ -70,6 +74,21 @@ BEGIN
   SELECT RAISE(ABORT, 'campaign is created in discovery');
 END;
 
+CREATE TRIGGER trg_campaign_snapshot_immutable
+BEFORE UPDATE ON review_campaign
+WHEN NEW.run_id              <> OLD.run_id
+  OR NEW.stage_id            <> OLD.stage_id
+  OR NEW.subject_id          <> OLD.subject_id
+  OR NEW.ordinal             <> OLD.ordinal
+  OR NEW.severity_threshold  <> OLD.severity_threshold
+  OR NEW.policy_version      <> OLD.policy_version
+  OR NEW.expected_lane_count <> OLD.expected_lane_count
+  OR NEW.opened_at           <> OLD.opened_at
+  OR NEW.public_id           <> OLD.public_id
+BEGIN
+  SELECT RAISE(ABORT, 'campaign identity and snapshot are immutable');
+END;
+
 CREATE TABLE review_round (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES review_campaign(id),
@@ -101,8 +120,6 @@ CREATE TABLE lane_assignment (
   lane_id     INTEGER NOT NULL REFERENCES review_lane(id),
   generation  INTEGER NOT NULL,
   profile_id  TEXT    NOT NULL,
-  provider    TEXT    NOT NULL,
-  model       TEXT    NOT NULL,
   assigned_at INTEGER NOT NULL,
   UNIQUE (lane_id, generation)
 );
@@ -157,6 +174,18 @@ CREATE TABLE reviewer_exposure (
       REFERENCES run_profile_resolution(run_id, profile_id, provider, model)
 );
 
+CREATE TRIGGER trg_exposure_immutable
+BEFORE UPDATE ON reviewer_exposure
+BEGIN
+  SELECT RAISE(ABORT, 'reviewer_exposure is immutable');
+END;
+
+CREATE TRIGGER trg_exposure_no_delete
+BEFORE DELETE ON reviewer_exposure
+BEGIN
+  SELECT RAISE(ABORT, 'reviewer_exposure rows are never deleted');
+END;
+
 -- === данные ===
 
 INSERT INTO attempt_role(role) VALUES ('author'),('reviewer'),('planner'),('reconciler');
@@ -184,23 +213,31 @@ INSERT INTO run_profile_resolution(run_id, profile_id, provider, model, resolved
 
 -- @step 01 кампания рождается в discovery
 -- @expect ok
-INSERT INTO review_campaign(id, run_id, stage_id, subject_id, ordinal, expected_lane_count, state)
-VALUES (1, 1, 7, 1, 1, 2, 'discovery');
+INSERT INTO review_campaign(id, public_id, run_id, stage_id, subject_id, ordinal,
+                            severity_threshold, policy_version,
+                            expected_lane_count, state, opened_at)
+VALUES (1, 'C-1', 1, 7, 1, 1, 'high', 'v1', 2, 'discovery', 50);
 
 -- @step 02 кампанию нельзя создать сразу в fix_cycle
 -- @expect error created in discovery
-INSERT INTO review_campaign(id, run_id, stage_id, subject_id, ordinal, expected_lane_count, state)
-VALUES (99, 1, 7, 1, 9, 2, 'fix_cycle');
+INSERT INTO review_campaign(id, public_id, run_id, stage_id, subject_id, ordinal,
+                            severity_threshold, policy_version,
+                            expected_lane_count, state, opened_at)
+VALUES (99, 'C-99', 1, 7, 1, 9, 'high', 'v1', 2, 'fix_cycle', 50);
 
 -- @step 03 дубль (stage, ordinal) отвергается; идемпотентность — на операции
 -- @expect error review_campaign.stage_id
-INSERT INTO review_campaign(id, run_id, stage_id, subject_id, ordinal, expected_lane_count, state)
-VALUES (98, 1, 7, 1, 1, 2, 'discovery');
+INSERT INTO review_campaign(id, public_id, run_id, stage_id, subject_id, ordinal,
+                            severity_threshold, policy_version,
+                            expected_lane_count, state, opened_at)
+VALUES (98, 'C-98', 1, 7, 1, 1, 'high', 'v1', 2, 'discovery', 50);
 
 -- @step 04 кворум из нуля линий
 -- @expect error expected_lane_count
-INSERT INTO review_campaign(id, run_id, stage_id, subject_id, ordinal, expected_lane_count, state)
-VALUES (97, 1, 7, 1, 8, 0, 'discovery');
+INSERT INTO review_campaign(id, public_id, run_id, stage_id, subject_id, ordinal,
+                            severity_threshold, policy_version,
+                            expected_lane_count, state, opened_at)
+VALUES (97, 'C-97', 1, 7, 1, 8, 'high', 'v1', 0, 'discovery', 50);
 
 INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (1, 1, 0), (2, 1, 1);
 
@@ -212,9 +249,9 @@ INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (96, 1, 2);
 -- @expect error outside declared quorum
 INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (95, 1, -1);
 
-INSERT INTO lane_assignment(id, lane_id, generation, profile_id, provider, model, assigned_at)
-VALUES (1, 1, 1, 'p-a', 'anthropic', 'opus', 100),
-       (2, 2, 1, 'p-b', 'openai',    'gpt',  100);
+INSERT INTO lane_assignment(id, lane_id, generation, profile_id, assigned_at)
+VALUES (1, 1, 1, 'p-a', 100),
+       (2, 2, 1, 'p-b', 100);
 INSERT INTO review_round(id, campaign_id, round_no, kind) VALUES (1, 1, 1, 'discovery');
 
 -- @step 07 открытие завершено: запрос незавершённости пуст
@@ -232,11 +269,13 @@ SELECT c.id FROM review_campaign c
                                        WHERE a.lane_id = l.id)));
 
 -- Кампания 2 оборвалась на первой линии: заявлено две, записана одна.
-INSERT INTO review_campaign(id, run_id, stage_id, subject_id, ordinal, expected_lane_count, state)
-VALUES (2, 1, 8, 2, 1, 2, 'discovery');
+INSERT INTO review_campaign(id, public_id, run_id, stage_id, subject_id, ordinal,
+                            severity_threshold, policy_version,
+                            expected_lane_count, state, opened_at)
+VALUES (2, 'C-2', 1, 8, 2, 1, 'high', 'v1', 2, 'discovery', 50);
 INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (3, 2, 0);
-INSERT INTO lane_assignment(id, lane_id, generation, profile_id, provider, model, assigned_at)
-VALUES (3, 3, 1, 'p-a', 'anthropic', 'opus', 100);
+INSERT INTO lane_assignment(id, lane_id, generation, profile_id, assigned_at)
+VALUES (3, 3, 1, 'p-a', 100);
 INSERT INTO review_round(id, campaign_id, round_no, kind) VALUES (2, 2, 1, 'discovery');
 
 -- @step 08 неполный roster виден recovery audit, хотя каждый слот оформлен
@@ -263,8 +302,8 @@ SELECT rr.campaign_id FROM review_round rr
 
 -- Кампания 2 дооткрыта: второй слот с исполнителем.
 INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (4, 2, 1);
-INSERT INTO lane_assignment(id, lane_id, generation, profile_id, provider, model, assigned_at)
-VALUES (4, 4, 1, 'p-b', 'openai', 'gpt', 100);
+INSERT INTO lane_assignment(id, lane_id, generation, profile_id, assigned_at)
+VALUES (4, 4, 1, 'p-b', 100);
 
 -- @step 10 после дооткрытия гейт состава пуст
 -- @expect empty
@@ -275,8 +314,10 @@ SELECT rr.campaign_id FROM review_round rr
          WHERE l.campaign_id = c.id) <> c.expected_lane_count;
 
 -- Кампания 3: слот есть, исполнителя нет.
-INSERT INTO review_campaign(id, run_id, stage_id, subject_id, ordinal, expected_lane_count, state)
-VALUES (3, 1, 9, 1, 1, 1, 'discovery');
+INSERT INTO review_campaign(id, public_id, run_id, stage_id, subject_id, ordinal,
+                            severity_threshold, policy_version,
+                            expected_lane_count, state, opened_at)
+VALUES (3, 'C-3', 1, 9, 1, 1, 'high', 'v1', 1, 'discovery', 50);
 INSERT INTO review_lane(id, campaign_id, lane_index) VALUES (5, 3, 0);
 INSERT INTO review_round(id, campaign_id, round_no, kind) VALUES (3, 3, 1, 'discovery');
 
@@ -288,6 +329,14 @@ SELECT c.id FROM review_campaign c
                 WHERE l.campaign_id = c.id
                   AND NOT EXISTS (SELECT 1 FROM lane_assignment a
                                    WHERE a.lane_id = l.id));
+
+-- @step 11a заявленный кворум нельзя подогнать под фактический roster
+-- @expect error identity and snapshot are immutable
+UPDATE review_campaign SET expected_lane_count = 1 WHERE id = 2;
+
+-- @step 11b снимок порога тоже неизменяем
+-- @expect error identity and snapshot are immutable
+UPDATE review_campaign SET severity_threshold = 'low' WHERE id = 1;
 
 -- @step 12 прыжок discovery -> fix_cycle в обход reconciliation
 -- @expect error illegal campaign state transition
@@ -403,13 +452,24 @@ VALUES (1, 1, 'sha-1', 'anthropic', 'opus', 1, 5, 'p-a', 700);
 SELECT provider, model FROM reviewer_exposure
  WHERE subject_id = 2 AND revision = 'sha-2';
 
+-- @step 32a UPDATE строки допуска
+-- @expect error immutable
+UPDATE reviewer_exposure SET model = 'sonnet' WHERE campaign_id = 2;
+
+-- @step 32b DELETE строки допуска: свежесть не возвращается удалением
+-- @expect error never deleted
+DELETE FROM reviewer_exposure WHERE campaign_id = 2;
+
 -- @step 33 foreign_key_check
 -- @expect empty
 PRAGMA foreign_key_check;
 
--- @step 34 объекты: таблица переходов и три триггера кампании со слотом
--- @expect rows-json [["table", 1], ["trigger", 3]]
+-- @step 34 объекты: таблица переходов и шесть триггеров кампании, слота
+-- и допуска
+-- @expect rows-json [["table", 1], ["trigger", 6]]
 SELECT type, COUNT(*) FROM sqlite_master
  WHERE name IN ('campaign_transition', 'trg_campaign_state_transition',
-                'trg_campaign_initial_state', 'trg_lane_index_bounds')
+                'trg_campaign_initial_state', 'trg_campaign_snapshot_immutable',
+                'trg_lane_index_bounds',
+                'trg_exposure_immutable', 'trg_exposure_no_delete')
  GROUP BY type ORDER BY type;
