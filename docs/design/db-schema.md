@@ -23,10 +23,10 @@ cross-campaign ссылки, формы строки попытки по рол�
 ревьюера, включая штатный `fix_check` по новой ревизии. Оба воспроизводятся и
 падают ненулевым кодом:
 `python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
-можно передать несколько). Третий прогон, `scope-keys.sql`, — 22 сценария на
-составные ключи scope из §5.3.1 — 36 сценариев: чужой прогон, чужая кампания
-и самый тихий класс — своя кампания, но чужой круг, чужая линия или чужая
-попытка.
+можно передать несколько). Третий прогон, `scope-keys.sql`, — 43 сценария на
+составные ключи scope из §5.3.1: чужой прогон, чужая кампания, самый тихий
+класс «своя кампания, но чужой круг, линия или попытка» и оба источника
+решения связи — агент и человек.
 
 Все три прогона доказывают **констрейнты и cardinality** — какие строки база
 принимает, а какие нет. Атомарность «переход + событие», поведение при падении
@@ -1502,10 +1502,31 @@ SELECT l.observation_id
 формулировка «валидация на приёме» покрывала слишком многое, и вот что из неё
 переехало в схему: связь ставит только **успешная** попытка (составной FK на
 `outcome` плюс CHECK), только роли `reviewer` или `reconciler`, только попытка
-**того же круга**, что и наблюдение, а ревьюер вправе связать лишь **повтор**
-и лишь **своё собственное** наблюдение — `first_seen`, `reaffirmation` и
-`reopening` выдаёт reconciliation. Последнее сравнивает две строки, поэтому
-триггер; всё остальное — ключи и CHECK.
+**того же круга**, что и наблюдение, а ревьюер вправе связать лишь **повтор**,
+лишь **своё собственное** наблюдение и лишь в `fix_check`. Последние два
+сравнивают строку с соседней таблицей, поэтому триггер; всё остальное — ключи и
+CHECK.
+
+**У решения два законных источника, и это часть контракта, а не деталь.**
+Кроме агента связь ставит **человек** — в двух названных решением Q49 случаях:
+он запасной reconciler при `reconcile_failed` (`architecture.md` §7.1.2, ответ
+мапится в те же четыре исхода) и он же решает судьбу наблюдения при
+`reopen_human_closed`, где link намеренно не создаётся до ответа. Первая
+редакция этих ключей человека не предусматривала — и тем самым делала оба
+принятых пути незаписываемыми. Подставить в такую строку последнюю
+провалившуюся попытку нельзя (`outcome <> 'succeeded'`), а синтезировать
+фиктивную успешную — ложь в аудите ровно там, где аудит важнее всего.
+
+Поэтому источников два и ровно один: `decided_by_attempt_id` (с ролью и
+исходом) **либо** `decided_by_human_answer_id`, что держит `CHECK` с `<>`. Для
+человека триггер проверяет, что ответ относится к вопросу **этой кампании** и
+одной из двух причин: `human_question` несёт и `campaign_id`, и `reason`, так
+что «человек ответил про другое» не пройдёт. Кто именно решил — читается из
+того, какая колонка заполнена; отдельного `authority` не нужно, как и в
+`finding_resolution`, где authority выводится из вида закрытия.
+
+Владельцы путей разные: agent-вариант пишет reconciliation (T1.5/T1.7b),
+human-вариант — обработка ответа в T1.16.
 
 Разница между двумя колонками таблицы важна: **утверждение, закрытое ключом,
 нельзя нарушить и потому незачем проверять; утверждение, оставленное коду,
@@ -1577,9 +1598,11 @@ CREATE TABLE finding_observation_link (
   round_id              INTEGER NOT NULL REFERENCES review_round(id),
   finding_id            INTEGER NOT NULL REFERENCES finding(id),
   link_type             TEXT    NOT NULL REFERENCES link_type(link_type),
-  decided_by_attempt_id INTEGER NOT NULL REFERENCES step_attempt(id),
-  decided_by_role       TEXT    NOT NULL,
-  decided_by_outcome    TEXT    NOT NULL,
+  -- Решение принял либо агент, либо человек. Ровно один источник.
+  decided_by_attempt_id INTEGER REFERENCES step_attempt(id),
+  decided_by_role       TEXT,
+  decided_by_outcome    TEXT,
+  decided_by_human_answer_id INTEGER REFERENCES human_answer(id),
   reason                TEXT,
   event_id              INTEGER NOT NULL REFERENCES run_event(id),
   created_at            INTEGER NOT NULL,
@@ -1599,23 +1622,51 @@ CREATE TABLE finding_observation_link (
       REFERENCES step_attempt(id, role),
   FOREIGN KEY (decided_by_attempt_id, decided_by_outcome)
       REFERENCES step_attempt(id, outcome),
-  CHECK (decided_by_outcome = 'succeeded'),
-  CHECK (decided_by_role IN ('reviewer', 'reconciler')),
+  -- XOR источника и полнота agent-варианта: три его колонки заполняются
+  -- только вместе.
+  CHECK ((decided_by_attempt_id IS NULL) <> (decided_by_human_answer_id IS NULL)),
+  CHECK ((decided_by_attempt_id IS NULL) = (decided_by_role IS NULL)),
+  CHECK ((decided_by_attempt_id IS NULL) = (decided_by_outcome IS NULL)),
+  CHECK (decided_by_outcome IS NULL OR decided_by_outcome = 'succeeded'),
+  CHECK (decided_by_role IS NULL OR decided_by_role IN ('reviewer', 'reconciler')),
   -- Ревьюер напрямую может связать только повтор известного finding;
-  -- first_seen, reaffirmation и reopening выдаёт reconciliation.
-  CHECK (decided_by_role <> 'reviewer' OR link_type = 'recurrence'),
+  -- first_seen, reaffirmation и reopening выдаёт reconciliation либо человек.
+  CHECK (decided_by_role IS NULL OR decided_by_role <> 'reviewer'
+         OR link_type = 'recurrence'),
   CHECK (link_type <> 'reopening' OR reason IS NOT NULL)
 );
 
--- Прямая связь ревьюера допустима только на его собственном наблюдении:
--- чужое наблюдение той же линии и круга он привязать не может.
-CREATE TRIGGER trg_link_reviewer_own_observation
+-- Прямая связь ревьюера допустима только на его собственном наблюдении и
+-- только в fix_check: первичные слепые наблюдения классифицирует
+-- reconciliation, у ревьюера в discovery ledger'а нет.
+CREATE TRIGGER trg_link_reviewer_direct_path
 BEFORE INSERT ON finding_observation_link
 WHEN NEW.decided_by_role = 'reviewer'
 BEGIN
   SELECT RAISE(ABORT, 'reviewer may link only its own observation')
   WHERE NEW.decided_by_attempt_id <> (
     SELECT o.attempt_id FROM review_observation o WHERE o.id = NEW.observation_id
+  );
+  SELECT RAISE(ABORT, 'reviewer direct link is allowed only in fix_check')
+  WHERE (SELECT r.kind FROM review_round r WHERE r.id = NEW.round_id) <> 'fix_check';
+END;
+
+-- Человек связывает наблюдения только там, где это предусмотрено решением
+-- Q49: он запасной reconciler при `reconcile_failed` и он же отвечает за
+-- переоткрытие при `reopen_human_closed`. Ответ обязан относиться к вопросу
+-- этой кампании и одной из двух причин.
+CREATE TRIGGER trg_link_human_authority
+BEFORE INSERT ON finding_observation_link
+WHEN NEW.decided_by_human_answer_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'human link requires reconcile_failed or reopen_human_closed answer of this campaign')
+  WHERE NOT EXISTS (
+    SELECT 1
+      FROM human_answer a
+      JOIN human_question q ON q.id = a.question_id
+     WHERE a.id = NEW.decided_by_human_answer_id
+       AND q.campaign_id = NEW.campaign_id
+       AND q.reason IN ('reconcile_failed', 'reopen_human_closed')
   );
 END;
 
