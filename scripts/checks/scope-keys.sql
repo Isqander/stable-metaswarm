@@ -207,7 +207,21 @@ CREATE TABLE human_question (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id      INTEGER NOT NULL REFERENCES run(id),
   campaign_id INTEGER REFERENCES review_campaign(id),
-  reason      TEXT    NOT NULL REFERENCES question_reason(reason)
+  round_id    INTEGER REFERENCES review_round(id),
+  reason      TEXT    NOT NULL REFERENCES question_reason(reason),
+  UNIQUE (id, campaign_id),
+  UNIQUE (id, round_id),
+  UNIQUE (id, reason),
+  FOREIGN KEY (campaign_id, round_id) REFERENCES review_round(campaign_id, id),
+  CHECK (reason NOT IN ('reconcile_failed', 'reopen_human_closed')
+         OR (campaign_id IS NOT NULL AND round_id IS NOT NULL))
+);
+
+CREATE TABLE human_question_observation (
+  question_id    INTEGER NOT NULL REFERENCES human_question(id),
+  observation_id INTEGER NOT NULL REFERENCES review_observation(id),
+  finding_id     INTEGER REFERENCES finding(id),
+  PRIMARY KEY (question_id, observation_id)
 );
 
 CREATE TABLE human_answer (
@@ -226,6 +240,7 @@ CREATE TABLE finding_observation_link (
   decided_by_role       TEXT,
   decided_by_outcome    TEXT,
   decided_by_human_answer_id INTEGER REFERENCES human_answer(id),
+  reason                TEXT,
   FOREIGN KEY (observation_id, campaign_id)
       REFERENCES review_observation(id, campaign_id),
   FOREIGN KEY (observation_id, round_id)
@@ -244,7 +259,8 @@ CREATE TABLE finding_observation_link (
   CHECK (decided_by_outcome IS NULL OR decided_by_outcome = 'succeeded'),
   CHECK (decided_by_role IS NULL OR decided_by_role IN ('reviewer', 'reconciler')),
   CHECK (decided_by_role IS NULL OR decided_by_role <> 'reviewer'
-         OR link_type = 'recurrence')
+         OR link_type = 'recurrence'),
+  CHECK (link_type <> 'reopening' OR reason IS NOT NULL)
 );
 
 CREATE TRIGGER trg_link_reviewer_direct_path
@@ -263,14 +279,33 @@ CREATE TRIGGER trg_link_human_authority
 BEFORE INSERT ON finding_observation_link
 WHEN NEW.decided_by_human_answer_id IS NOT NULL
 BEGIN
-  SELECT RAISE(ABORT, 'human link requires reconcile_failed or reopen_human_closed answer of this campaign')
+  SELECT RAISE(ABORT, 'human link requires reconcile_failed or reopen_human_closed answer of this round')
   WHERE NOT EXISTS (
     SELECT 1
       FROM human_answer a
       JOIN human_question q ON q.id = a.question_id
      WHERE a.id = NEW.decided_by_human_answer_id
        AND q.campaign_id = NEW.campaign_id
+       AND q.round_id    = NEW.round_id
        AND q.reason IN ('reconcile_failed', 'reopen_human_closed')
+  );
+  SELECT RAISE(ABORT, 'observation was not part of the answered question')
+  WHERE NOT EXISTS (
+    SELECT 1
+      FROM human_answer a
+      JOIN human_question_observation qo ON qo.question_id = a.question_id
+     WHERE a.id = NEW.decided_by_human_answer_id
+       AND qo.observation_id = NEW.observation_id
+  );
+  SELECT RAISE(ABORT, 'finding is not the target of the reopen request')
+  WHERE EXISTS (
+    SELECT 1
+      FROM human_answer a
+      JOIN human_question_observation qo ON qo.question_id = a.question_id
+     WHERE a.id = NEW.decided_by_human_answer_id
+       AND qo.observation_id = NEW.observation_id
+       AND qo.finding_id IS NOT NULL
+       AND qo.finding_id <> NEW.finding_id
   );
 END;
 
@@ -473,65 +508,65 @@ VALUES (7, 1, 1, 'reconciler', 1, 1, NULL, 'sha-1', 'succeeded'),
 -- @expect ok
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (1, 1, 1, 1, 'first_seen', 7, 'reconciler', 'succeeded', NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (1, 1, 1, 1, 'first_seen', 7, 'reconciler', 'succeeded', NULL, NULL);
 
 -- @step 28 связь: решившая попытка из другой кампании
 -- @expect error FOREIGN KEY
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (8, 1, 3, 1, 'recurrence', 2, 'reconciler', 'succeeded', NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (8, 1, 3, 1, 'recurrence', 2, 'reconciler', 'succeeded', NULL, NULL);
 
 -- @step 29 связь: кампания не та, к которой принадлежит наблюдение
 -- @expect error FOREIGN KEY
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (9, 1, 1, 1, 'recurrence', 1, 'reconciler', 'succeeded', NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (9, 1, 1, 1, 'recurrence', 1, 'reconciler', 'succeeded', NULL, NULL);
 
 -- @step 30 связь: reconciler ПРЕДЫДУЩЕГО круга
 -- @expect error FOREIGN KEY
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (8, 1, 3, 1, 'recurrence', 7, 'reconciler', 'succeeded', NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (8, 1, 3, 1, 'recurrence', 7, 'reconciler', 'succeeded', NULL, NULL);
 
 -- @step 31 связь: попытка ещё не завершилась
 -- @expect error FOREIGN KEY
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (8, 1, 3, 1, 'recurrence', 8, 'reconciler', 'succeeded', NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (8, 1, 3, 1, 'recurrence', 8, 'reconciler', 'succeeded', NULL, NULL);
 
 -- @step 32 связь: ревьюер выдаёт first_seen — это работа reconciliation
 -- @expect error CHECK
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (8, 1, 3, 1, 'first_seen', 6, 'reviewer', 'succeeded', NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (8, 1, 3, 1, 'first_seen', 6, 'reviewer', 'succeeded', NULL, NULL);
 
 -- @step 33 связь: ревьюер привязывает ЧУЖОЕ наблюдение своего круга
 -- @expect error own observation
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (8, 1, 3, 1, 'recurrence', 9, 'reviewer', 'succeeded', NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (8, 1, 3, 1, 'recurrence', 9, 'reviewer', 'succeeded', NULL, NULL);
 
 -- @step 34 связь: ревьюер привязывает своё наблюдение как recurrence
 -- @expect ok
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (8, 1, 3, 1, 'recurrence', 6, 'reviewer', 'succeeded', NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (8, 1, 3, 1, 'recurrence', 6, 'reviewer', 'succeeded', NULL, NULL);
 
 -- Прогон finding в связи база не проверяет — §5.3.1 относит это к коду.
 INSERT INTO review_observation(id, campaign_id, round_id, lane_id, attempt_id, subject_id, revision, seq)
 VALUES (10, 1, 3, 3, 9, 1, 'sha-1b', 10);
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (10, 1, 3, 5, 'recurrence', 9, 'reviewer', 'succeeded', NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (10, 1, 3, 5, 'recurrence', 9, 'reviewer', 'succeeded', NULL, NULL);
 
 -- @step 35 recovery-запрос ловит связь с finding чужого прогона
 -- @expect rows-json [[10]]
@@ -543,62 +578,99 @@ SELECT l.observation_id
  WHERE f.run_id <> c.run_id;
 
 -- Вопросы человека: reconcile_failed по кампании 1 и dispute по ней же.
-INSERT INTO human_question(id, run_id, campaign_id, reason) VALUES
-  (1, 1, 1, 'reconcile_failed'), (2, 1, 1, 'dispute'), (3, 1, 2, 'reconcile_failed');
-INSERT INTO human_answer(id, question_id) VALUES (1, 1), (2, 2), (3, 3);
+INSERT INTO human_question(id, run_id, campaign_id, round_id, reason) VALUES
+  (1, 1, 1, 1, 'reconcile_failed'),      -- круг 1 кампании 1
+  (2, 1, 1, 1, 'dispute'),
+  (3, 1, 2, 2, 'reconcile_failed'),      -- другая кампания
+  (4, 1, 1, 1, 'reopen_human_closed');   -- pending-запрос с целью
+INSERT INTO human_answer(id, question_id) VALUES (1, 1), (2, 2), (3, 3), (4, 4);
 INSERT INTO review_observation(id, campaign_id, round_id, lane_id, attempt_id, subject_id, revision, seq)
 VALUES (11, 1, 1, 3, 4, 1, 'sha-1', 11),
        (12, 1, 1, 1, 1, 1, 'sha-1', 12),
-       (13, 1, 1, 1, 1, 1, 'sha-1', 13);
+       (13, 1, 1, 1, 1, 1, 'sha-1', 13),
+       (14, 1, 3, 1, 6, 1, 'sha-1b', 14),
+       (15, 1, 1, 1, 1, 1, 'sha-1', 15);
+-- Что человек видел: вопрос 1 — наблюдения 11 и 12; вопрос 4 — наблюдение 15
+-- с зафиксированной целью переоткрытия.
+INSERT INTO human_question_observation(question_id, observation_id, finding_id) VALUES
+  (1, 11, NULL), (1, 12, NULL), (4, 15, 1);
 
 -- @step 35a человек как запасной reconciler: first_seen без agent attempt
 -- @expect ok
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (11, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 1);
+                                     decided_by_human_answer_id, reason)
+VALUES (11, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 1, NULL);
 
 -- @step 35b человек: reopening тем же ответом
 -- @expect ok
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (12, 1, 1, 1, 'reopening', NULL, NULL, NULL, 1);
+                                     decided_by_human_answer_id, reason)
+VALUES (12, 1, 1, 1, 'reopening', NULL, NULL, NULL, 1, 'человек переоткрыл');
 
 -- @step 35c человек: ответ на вопрос не той причины
 -- @expect error reconcile_failed or reopen_human_closed
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 2);
+                                     decided_by_human_answer_id, reason)
+VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 2, NULL);
 
 -- @step 35d человек: ответ по другой кампании
 -- @expect error reconcile_failed or reopen_human_closed
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 3);
+                                     decided_by_human_answer_id, reason)
+VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 3, NULL);
 
 -- @step 35e оба источника сразу
 -- @expect error CHECK
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (13, 1, 1, 1, 'first_seen', 7, 'reconciler', 'succeeded', 1);
+                                     decided_by_human_answer_id, reason)
+VALUES (12, 1, 1, 1, 'first_seen', 7, 'reconciler', 'succeeded', 1, NULL);
 
 -- @step 35f ни одного источника
 -- @expect error CHECK
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, NULL, NULL);
 
 -- @step 35g ревьюер ставит recurrence своему наблюдению из discovery
 -- @expect error only in fix_check
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id)
-VALUES (13, 1, 1, 1, 'recurrence', 1, 'reviewer', 'succeeded', NULL);
+                                     decided_by_human_answer_id, reason)
+VALUES (13, 1, 1, 1, 'recurrence', 1, 'reviewer', 'succeeded', NULL, NULL);
+
+-- @step 35h человек: ответ ПРОШЛОГО круга к наблюдению текущего
+-- @expect error answer of this round
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome,
+                                     decided_by_human_answer_id, reason)
+VALUES (14, 1, 3, 1, 'first_seen', NULL, NULL, NULL, 1, NULL);
+
+-- @step 35i человек: наблюдение своего круга, но не входившее в вопрос
+-- @expect error not part of the answered question
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome,
+                                     decided_by_human_answer_id, reason)
+VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 1, NULL);
+
+-- @step 35j reopen: переоткрытие своей цели
+-- @expect ok
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome,
+                                     decided_by_human_answer_id, reason)
+VALUES (15, 1, 1, 1, 'reopening', NULL, NULL, NULL, 4, 'человек вернул закрытое');
+
+-- @step 35k reopen: чужая цель тем же ответом
+-- @expect error not the target of the reopen request
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome,
+                                     decided_by_human_answer_id, reason)
+VALUES (15, 1, 1, 5, 'reopening', NULL, NULL, NULL, 4, 'чужая цель');
 
 -- @step 36 foreign_key_check
 -- @expect empty

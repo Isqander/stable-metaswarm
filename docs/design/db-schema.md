@@ -3,7 +3,8 @@
 **Инвентарь ниже устарел намеренно.** Числа `61/24/6/6` относятся к шестой
 редакции; после неё вошли модель effective roster (C-01b) — **+2 таблицы,
 +2 индекса, +1 представление, +9 триггеров** — и schema-effects C-01a/C-01c и
-C-04: **+1 таблица** (`campaign_transition`), **+4 индекса**, **+8 триггеров**,
+C-04: **+2 таблицы** (`campaign_transition`, `human_question_observation`),
+**+4 индекса**, **+13 триггеров**,
 плюс новые колонки: `review_campaign.expected_lane_count`,
 `reviewer_exposure.profile_id`, `run_id` у слота и назначения и четыре у
 попытки — `campaign_id`, `round_id`, `lane_assignment_id`,
@@ -23,10 +24,11 @@ cross-campaign ссылки, формы строки попытки по рол�
 ревьюера, включая штатный `fix_check` по новой ревизии. Оба воспроизводятся и
 падают ненулевым кодом:
 `python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
-можно передать несколько). Третий прогон, `scope-keys.sql`, — 43 сценария на
+можно передать несколько). Третий прогон, `scope-keys.sql`, — 47 сценариев на
 составные ключи scope из §5.3.1: чужой прогон, чужая кампания, самый тихий
 класс «своя кампания, но чужой круг, линия или попытка» и оба источника
-решения связи — агент и человек.
+решения связи — агент и человек, включая привязку ответа к кругу и к набору
+показанных наблюдений.
 
 Все три прогона доказывают **констрейнты и cardinality** — какие строки база
 принимает, а какие нет. Атомарность «переход + событие», поведение при падении
@@ -223,7 +225,8 @@ review-домен     review_subject, review_campaign, campaign_transition,
                  author_revision, review_observation, finding,
                  finding_observation_link, finding_round, finding_resolution,
                  severity_override, reviewer_exposure, run_profile_resolution
-человек          human_question, human_answer, notification_outbox,
+человек          human_question, human_question_observation, human_answer,
+                 notification_outbox,
                  telegram_inbox, telegram_cursor
 артефакты        artifact_revision, artifact_approval, verification_run
 справочники      severity_scale, attempt_outcome, attempt_role,
@@ -1518,15 +1521,29 @@ CHECK.
 фиктивную успешную — ложь в аудите ровно там, где аудит важнее всего.
 
 Поэтому источников два и ровно один: `decided_by_attempt_id` (с ролью и
-исходом) **либо** `decided_by_human_answer_id`, что держит `CHECK` с `<>`. Для
-человека триггер проверяет, что ответ относится к вопросу **этой кампании** и
-одной из двух причин: `human_question` несёт и `campaign_id`, и `reason`, так
-что «человек ответил про другое» не пройдёт. Кто именно решил — читается из
+исходом) **либо** `decided_by_human_answer_id`, что держит `CHECK` с `<>`.
+
+**Ответа «по этой кампании» недостаточно, и это отдельный урок.** Кампания
+живёт несколько кругов: ответ на `reconcile_failed` из круга 1 формально
+подошёл бы наблюдению круга 2, которого человек никогда не видел, — и
+исторический ответ классифицировал бы новое наблюдение. Поэтому у
+review-вопроса появился `round_id` (обязательный для обеих причин по CHECK), а
+состав того, что человек видел, вынесен в `human_question_observation` —
+нормализованное членство вместо разбора `snapshot_json` кодом. Триггер требует
+три вещи: вопрос той же кампании **и того же круга**, наблюдение **входит в
+набор вопроса**, а если у строки членства зафиксирован target (случай
+`reopen_human_closed`), то и `finding_id` связи обязан ему совпасть. Одного
+круга мало: reopen-запрос покрывает лишь часть наблюдений круга, и T1.5
+требует полного покрытия именно pending-набора. Кто именно решил — читается из
 того, какая колонка заполнена; отдельного `authority` не нужно, как и в
 `finding_resolution`, где authority выводится из вида закрытия.
 
 Владельцы путей разные: agent-вариант пишет reconciliation (T1.5/T1.7b),
-human-вариант — обработка ответа в T1.16.
+human-вариант — обработка ответа в T1.16. Там же владение наполнением
+`human_question_observation`: строки пишутся в той же транзакции, что и сам
+вопрос, — иначе к моменту ответа доказать, что человек видел этот набор, будет
+нечем. Негативный AC у T1.16 обязателен: ответ прошлого круга к наблюдению
+текущего должен отвергаться.
 
 Разница между двумя колонками таблицы важна: **утверждение, закрытое ключом,
 нельзя нарушить и потому незачем проверять; утверждение, оставленное коду,
@@ -1659,14 +1676,37 @@ CREATE TRIGGER trg_link_human_authority
 BEFORE INSERT ON finding_observation_link
 WHEN NEW.decided_by_human_answer_id IS NOT NULL
 BEGIN
-  SELECT RAISE(ABORT, 'human link requires reconcile_failed or reopen_human_closed answer of this campaign')
+  -- Вопрос — по этой кампании, этому кругу и одной из двух причин.
+  SELECT RAISE(ABORT, 'human link requires reconcile_failed or reopen_human_closed answer of this round')
   WHERE NOT EXISTS (
     SELECT 1
       FROM human_answer a
       JOIN human_question q ON q.id = a.question_id
      WHERE a.id = NEW.decided_by_human_answer_id
        AND q.campaign_id = NEW.campaign_id
+       AND q.round_id    = NEW.round_id
        AND q.reason IN ('reconcile_failed', 'reopen_human_closed')
+  );
+  -- И это наблюдение человек действительно видел: одного круга мало, вопрос
+  -- может покрывать лишь часть наблюдений.
+  SELECT RAISE(ABORT, 'observation was not part of the answered question')
+  WHERE NOT EXISTS (
+    SELECT 1
+      FROM human_answer a
+      JOIN human_question_observation qo ON qo.question_id = a.question_id
+     WHERE a.id = NEW.decided_by_human_answer_id
+       AND qo.observation_id = NEW.observation_id
+  );
+  -- У reopen-запроса зафиксирован target: чужую личность им переоткрыть нельзя.
+  SELECT RAISE(ABORT, 'finding is not the target of the reopen request')
+  WHERE EXISTS (
+    SELECT 1
+      FROM human_answer a
+      JOIN human_question_observation qo ON qo.question_id = a.question_id
+     WHERE a.id = NEW.decided_by_human_answer_id
+       AND qo.observation_id = NEW.observation_id
+       AND qo.finding_id IS NOT NULL
+       AND qo.finding_id <> NEW.finding_id
   );
 END;
 
@@ -2609,6 +2649,7 @@ CREATE TABLE human_question (
   branch_id     INTEGER REFERENCES branch(id),
   stage_id      INTEGER REFERENCES stage_execution(id),
   campaign_id   INTEGER REFERENCES review_campaign(id),
+  round_id      INTEGER REFERENCES review_round(id),
   finding_id    INTEGER REFERENCES finding(id),
   reason        TEXT    NOT NULL REFERENCES question_reason(reason),
                                        -- cap_exhausted_same | cap_exhausted_new
@@ -2621,8 +2662,37 @@ CREATE TABLE human_question (
   snapshot_json TEXT,                  -- severity, порог, версия политики на момент решения
   asked_at      INTEGER NOT NULL,
   answered_at   INTEGER,
-  reask_count   INTEGER NOT NULL DEFAULT 0
+  reask_count   INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (id, campaign_id),                -- под scope-FK членства
+  UNIQUE (id, round_id),
+  UNIQUE (id, reason),
+  FOREIGN KEY (campaign_id, round_id) REFERENCES review_round(campaign_id, id),
+  -- Две причины, где человек классифицирует наблюдения, обязаны нести круг:
+  -- без него ответ нельзя отличить от ответа на прошлый круг той же кампании.
+  CHECK (reason NOT IN ('reconcile_failed', 'reopen_human_closed')
+         OR (campaign_id IS NOT NULL AND round_id IS NOT NULL))
 );
+
+-- Что именно человек видел, когда отвечал. Нормализованное членство вместо
+-- разбора snapshot_json: только по этим строкам его решение и применимо.
+CREATE TABLE human_question_observation (
+  question_id    INTEGER NOT NULL REFERENCES human_question(id),
+  observation_id INTEGER NOT NULL REFERENCES review_observation(id),
+  finding_id     INTEGER REFERENCES finding(id),   -- target у reopen-запроса
+  PRIMARY KEY (question_id, observation_id)
+);
+
+CREATE TRIGGER trg_question_observation_immutable
+BEFORE UPDATE ON human_question_observation
+BEGIN
+  SELECT RAISE(ABORT, 'human_question_observation is immutable');
+END;
+
+CREATE TRIGGER trg_question_observation_no_delete
+BEFORE DELETE ON human_question_observation
+BEGIN
+  SELECT RAISE(ABORT, 'human_question_observation rows are never deleted');
+END;
 
 CREATE INDEX ix_question_open ON human_question (run_id) WHERE answered_at IS NULL;
 
