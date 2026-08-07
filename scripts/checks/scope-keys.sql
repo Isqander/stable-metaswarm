@@ -82,7 +82,7 @@ CREATE TABLE review_round (
   preceding_revision_id INTEGER REFERENCES author_revision(id),
   UNIQUE (campaign_id, round_no),
   UNIQUE (campaign_id, id),
-  UNIQUE (id, round_no),
+  UNIQUE (campaign_id, id, round_no),
   FOREIGN KEY (preceding_revision_id, campaign_id)
       REFERENCES author_revision(id, campaign_id),
   CHECK ((kind = 'discovery') = (preceding_revision_id IS NULL))
@@ -180,9 +180,8 @@ CREATE TABLE finding_round (
   owner_lane_id       INTEGER NOT NULL REFERENCES review_lane(id),
   reviewer_attempt_id INTEGER REFERENCES step_attempt(id),
   UNIQUE (campaign_id, finding_id, round_no),
-  FOREIGN KEY (campaign_id, round_no) REFERENCES review_round(campaign_id, round_no),
-  FOREIGN KEY (campaign_id, round_id) REFERENCES review_round(campaign_id, id),
-  FOREIGN KEY (round_id, round_no)    REFERENCES review_round(id, round_no),
+  FOREIGN KEY (campaign_id, round_id, round_no)
+      REFERENCES review_round(campaign_id, id, round_no),
   FOREIGN KEY (campaign_id, owner_lane_id) REFERENCES review_lane(campaign_id, id),
   FOREIGN KEY (reviewer_attempt_id, campaign_id) REFERENCES step_attempt(id, campaign_id),
   FOREIGN KEY (reviewer_attempt_id, round_id)    REFERENCES step_attempt(id, round_id),
@@ -206,14 +205,38 @@ CREATE TABLE finding_resolution (
 CREATE TABLE finding_observation_link (
   observation_id        INTEGER PRIMARY KEY REFERENCES review_observation(id),
   campaign_id           INTEGER NOT NULL REFERENCES review_campaign(id),
+  round_id              INTEGER NOT NULL REFERENCES review_round(id),
   finding_id            INTEGER NOT NULL REFERENCES finding(id),
   link_type             TEXT    NOT NULL REFERENCES link_type(link_type),
   decided_by_attempt_id INTEGER NOT NULL REFERENCES step_attempt(id),
+  decided_by_role       TEXT    NOT NULL,
+  decided_by_outcome    TEXT    NOT NULL,
   FOREIGN KEY (observation_id, campaign_id)
       REFERENCES review_observation(id, campaign_id),
+  FOREIGN KEY (observation_id, round_id)
+      REFERENCES review_observation(id, round_id),
   FOREIGN KEY (decided_by_attempt_id, campaign_id)
-      REFERENCES step_attempt(id, campaign_id)
+      REFERENCES step_attempt(id, campaign_id),
+  FOREIGN KEY (decided_by_attempt_id, round_id)
+      REFERENCES step_attempt(id, round_id),
+  FOREIGN KEY (decided_by_attempt_id, decided_by_role)
+      REFERENCES step_attempt(id, role),
+  FOREIGN KEY (decided_by_attempt_id, decided_by_outcome)
+      REFERENCES step_attempt(id, outcome),
+  CHECK (decided_by_outcome = 'succeeded'),
+  CHECK (decided_by_role IN ('reviewer', 'reconciler')),
+  CHECK (decided_by_role <> 'reviewer' OR link_type = 'recurrence')
 );
+
+CREATE TRIGGER trg_link_reviewer_own_observation
+BEFORE INSERT ON finding_observation_link
+WHEN NEW.decided_by_role = 'reviewer'
+BEGIN
+  SELECT RAISE(ABORT, 'reviewer may link only its own observation')
+  WHERE NEW.decided_by_attempt_id <> (
+    SELECT o.attempt_id FROM review_observation o WHERE o.id = NEW.observation_id
+  );
+END;
 
 -- === данные ===
 
@@ -401,27 +424,69 @@ VALUES (2, 1, 5, 1, 1, 1);
 
 -- === связь ===
 
--- @step 27 связь своей кампании
+-- Попытка reconciler круга 1 и незавершённая попытка — для проверок ниже.
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id, subject_revision, outcome)
+VALUES (7, 1, 1, 'reconciler', 1, 1, NULL, 'sha-1', 'succeeded'),
+       (8, 1, 1, 'reconciler', 1, 3, NULL, 'sha-1b', NULL),
+       (9, 1, 1, 'reviewer',   1, 3, 3,    'sha-1b', 'succeeded');
+
+-- @step 27 связь: first_seen от reconciler своего круга
 -- @expect ok
-INSERT INTO finding_observation_link(observation_id, campaign_id, finding_id, link_type, decided_by_attempt_id)
-VALUES (1, 1, 1, 'first_seen', 1);
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome)
+VALUES (1, 1, 1, 1, 'first_seen', 7, 'reconciler', 'succeeded');
 
 -- @step 28 связь: решившая попытка из другой кампании
 -- @expect error FOREIGN KEY
-INSERT INTO finding_observation_link(observation_id, campaign_id, finding_id, link_type, decided_by_attempt_id)
-VALUES (8, 1, 1, 'recurrence', 2);
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome)
+VALUES (8, 1, 3, 1, 'recurrence', 2, 'reconciler', 'succeeded');
 
 -- @step 29 связь: кампания не та, к которой принадлежит наблюдение
 -- @expect error FOREIGN KEY
-INSERT INTO finding_observation_link(observation_id, campaign_id, finding_id, link_type, decided_by_attempt_id)
-VALUES (9, 1, 1, 'recurrence', 1);
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome)
+VALUES (9, 1, 1, 1, 'recurrence', 1, 'reconciler', 'succeeded');
+
+-- @step 30 связь: reconciler ПРЕДЫДУЩЕГО круга
+-- @expect error FOREIGN KEY
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome)
+VALUES (8, 1, 3, 1, 'recurrence', 7, 'reconciler', 'succeeded');
+
+-- @step 31 связь: попытка ещё не завершилась
+-- @expect error FOREIGN KEY
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome)
+VALUES (8, 1, 3, 1, 'recurrence', 8, 'reconciler', 'succeeded');
+
+-- @step 32 связь: ревьюер выдаёт first_seen — это работа reconciliation
+-- @expect error CHECK
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome)
+VALUES (8, 1, 3, 1, 'first_seen', 6, 'reviewer', 'succeeded');
+
+-- @step 33 связь: ревьюер привязывает ЧУЖОЕ наблюдение своего круга
+-- @expect error own observation
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome)
+VALUES (8, 1, 3, 1, 'recurrence', 8, 'reviewer', 'succeeded');
+
+-- @step 34 связь: ревьюер привязывает своё наблюдение как recurrence
+-- @expect ok
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome)
+VALUES (8, 1, 3, 1, 'recurrence', 6, 'reviewer', 'succeeded');
 
 -- Прогон finding в связи база не проверяет — §5.3.1 относит это к коду.
-INSERT INTO finding_observation_link(observation_id, campaign_id, finding_id, link_type, decided_by_attempt_id)
-VALUES (8, 1, 5, 'recurrence', 6);
+INSERT INTO review_observation(id, campaign_id, round_id, lane_id, attempt_id, subject_id, revision, seq)
+VALUES (10, 1, 3, 3, 9, 1, 'sha-1b', 10);
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome)
+VALUES (10, 1, 3, 5, 'recurrence', 9, 'reviewer', 'succeeded');
 
--- @step 30 recovery-запрос ловит связь с finding чужого прогона
--- @expect rows-json [[8]]
+-- @step 35 recovery-запрос ловит связь с finding чужого прогона
+-- @expect rows-json [[10]]
 SELECT l.observation_id
   FROM finding_observation_link l
   JOIN review_observation o ON o.id = l.observation_id
@@ -429,6 +494,6 @@ SELECT l.observation_id
   JOIN finding            f ON f.id = l.finding_id
  WHERE f.run_id <> c.run_id;
 
--- @step 31 foreign_key_check
+-- @step 36 foreign_key_check
 -- @expect empty
 PRAGMA foreign_key_check;
