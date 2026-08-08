@@ -494,7 +494,10 @@ allowlist, кнопки. Транспортно-нейтральный outbox и
 переспрос с лимитом, `awaiting_continue`. Транспортно-нейтральный
 `notification_outbox` и отправитель `cli`, выдающий ожидающее по команде `ask`.
 Задача реализует production `HumanGateFormatter`-порт T1.7b: он получает уже
-готовый `AskHuman` и immutable context, не читает БД, не выполняет I/O и не
+готовый `HumanGateRequest` — закрытый union из `AfterCheckGate(AskHuman)`,
+`ReconcileFailedGate` и `HumanReopenGate` — и immutable context. `AskHuman` для
+путей Q49 не годится: его `ReviewStopReason` знает только три причины и требует
+`escalated`/`fix_cycle`. Порт не читает БД, не выполняет I/O и не
 выбирает reason.
 Для `dispute`/`cap_exhausted_*` свободный текст обязан свестись в одно
 кампанийное действие; смешанная per-finding раскладка не применяется частично и
