@@ -131,6 +131,15 @@ def main(path: str) -> int:
         if not statement:
             continue
 
+        # Шаг с ожиданием идёт в своём savepoint. Без этого мутационная
+        # проверка врёт: разрешённая мутацией вставка остаётся в базе и роняет
+        # соседние сценарии, а назначенный шаг может покраснеть «за компанию».
+        # Подготовка (без @expect) выполняется обычным порядком — её эффект
+        # нужен последующим шагам.
+        guarded = step.expect is not None
+        if guarded:
+            con.execute("SAVEPOINT step")
+
         error = rows = None
         try:
             rows = con.execute(statement).fetchall()
@@ -146,6 +155,13 @@ def main(path: str) -> int:
             continue
 
         problem = check(step, error, rows)
+        # Ожидание совпало — эффект шага остаётся; не совпало — откатываем,
+        # чтобы одна ошибка не превращалась в лавину чужих.
+        if problem is None:
+            con.execute("RELEASE step")
+        else:
+            con.execute("ROLLBACK TO step")
+            con.execute("RELEASE step")
         label = step.name or statement.splitlines()[0]
         if problem is None:
             passed += 1

@@ -535,6 +535,7 @@ VALUES (2, 1, 5, 1, 1, 1);
 -- Попытка reconciler круга 1 и незавершённая попытка — для проверок ниже.
 INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id, subject_revision, outcome)
 VALUES (7, 1, 1, 'reconciler', 1, 1, NULL, 'sha-1', 'succeeded'),
+       (10, 2, 2, 'reconciler', 2, 2, NULL, 'sha-2', 'succeeded'),
        (8, 1, 1, 'reconciler', 1, 3, NULL, 'sha-1b', NULL),
        (9, 1, 1, 'reviewer',   1, 3, 3,    'sha-1b', 'succeeded');
 
@@ -550,14 +551,14 @@ VALUES (1, 1, 1, 1, 'first_seen', 7, 'reconciler', 'succeeded', NULL, NULL);
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
                                      decided_by_human_answer_id, reason)
-VALUES (8, 1, 3, 1, 'recurrence', 2, 'reconciler', 'succeeded', NULL, NULL);
+VALUES (8, 1, 3, 1, 'recurrence', 10, 'reconciler', 'succeeded', NULL, NULL);
 
 -- @step 29 связь: кампания не та, к которой принадлежит наблюдение
 -- @expect error FOREIGN KEY
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
                                      decided_by_human_answer_id, reason)
-VALUES (9, 1, 1, 1, 'recurrence', 1, 'reconciler', 'succeeded', NULL, NULL);
+VALUES (9, 1, 1, 1, 'recurrence', 7, 'reconciler', 'succeeded', NULL, NULL);
 
 -- @step 30 связь: reconciler ПРЕДЫДУЩЕГО круга
 -- @expect error FOREIGN KEY
@@ -622,7 +623,8 @@ VALUES (11, 1, 1, 3, 4, 1, 'sha-1', 11),
        (12, 1, 1, 1, 1, 1, 'sha-1', 12),
        (13, 1, 1, 1, 1, 1, 'sha-1', 13),
        (14, 1, 3, 1, 6, 1, 'sha-1b', 14),
-       (15, 1, 1, 1, 1, 1, 'sha-1', 15);
+       (15, 1, 1, 1, 1, 1, 'sha-1', 15),
+       (16, 1, 1, 1, 1, 1, 'sha-1', 16);
 -- @step 35q вопрос по кампании другого прогона
 -- @expect error FOREIGN KEY
 INSERT INTO human_question(id, run_id, campaign_id, round_id, reason)
@@ -658,6 +660,7 @@ VALUES (4, 15, 1, 1, 1, 'reopen_human_closed', 5);
 INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
 VALUES (1, 11, 1, 1, 1, 'reconcile_failed', NULL),
        (1, 12, 1, 1, 1, 'reconcile_failed', NULL),
+       (1, 16, 1, 1, 1, 'reconcile_failed', NULL),
        (4, 15, 1, 1, 1, 'reopen_human_closed', 1);
 -- @step 35x1 членство: круг строки — круг наблюдения, но не вопроса
 -- @expect error FOREIGN KEY
@@ -742,7 +745,7 @@ VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 5, NULL);
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
                                      decided_by_human_answer_id, reason)
-VALUES (11, 1, 1, 1, 'first_seen', 7, 'reconciler', 'succeeded', 1, NULL);
+VALUES (16, 1, 1, 1, 'first_seen', 7, 'reconciler', 'succeeded', 1, NULL);
 
 -- @step 35f ни одного источника
 -- @expect error CHECK
@@ -772,6 +775,13 @@ INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, find
                                      decided_by_human_answer_id, reason)
 VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 1, NULL);
 
+-- @step 35k reopen: чужая цель тем же ответом
+-- @expect error not the target of the reopen request
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome,
+                                     decided_by_human_answer_id, reason)
+VALUES (15, 1, 1, 5, 'reopening', NULL, NULL, NULL, 4, 'чужая цель');
+
 -- @step 35j reopen: переоткрытие своей цели
 -- @expect ok
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
@@ -779,12 +789,29 @@ INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, find
                                      decided_by_human_answer_id, reason)
 VALUES (15, 1, 1, 1, 'reopening', NULL, NULL, NULL, 4, 'человек вернул закрытое');
 
--- @step 35k reopen: чужая цель тем же ответом
--- @expect error not the target of the reopen request
-INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
-                                     decided_by_attempt_id, decided_by_role, decided_by_outcome,
-                                     decided_by_human_answer_id, reason)
-VALUES (15, 1, 1, 5, 'reopening', NULL, NULL, NULL, 4, 'чужая цель');
+-- Стадия 3 того же прогона — она не принадлежит кампании 1.
+INSERT INTO stage_execution(id, run_id, branch_id) VALUES (3, 1, 1);
+
+-- Авторские попытки: своя стадия, чужая стадия и стадия 3 того же прогона.
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id, subject_revision, outcome)
+VALUES (11, 1, 1, 'author', NULL, NULL, NULL, NULL, 'succeeded'),
+       (12, 2, 2, 'author', NULL, NULL, NULL, NULL, 'succeeded'),
+       (13, 1, 3, 'author', NULL, NULL, NULL, NULL, 'succeeded');
+
+-- @step 35A авторская правка: попытка с другой стадии
+-- @expect error FOREIGN KEY
+INSERT INTO author_revision(id, campaign_id, stage_id, revision_no, attempt_id, attempt_role, attempt_outcome)
+VALUES (2, 1, 1, 2, 12, 'author', 'succeeded');
+
+-- @step 35B авторская правка: стадия не та, что у кампании
+-- @expect error FOREIGN KEY
+INSERT INTO author_revision(id, campaign_id, stage_id, revision_no, attempt_id, attempt_role, attempt_outcome)
+VALUES (3, 1, 3, 3, 13, 'author', 'succeeded');
+
+-- @step 35C авторская правка на своей стадии
+-- @expect ok
+INSERT INTO author_revision(id, campaign_id, stage_id, revision_no, attempt_id, attempt_role, attempt_outcome)
+VALUES (4, 1, 1, 4, 11, 'author', 'succeeded');
 
 -- @step 36 foreign_key_check
 -- @expect empty

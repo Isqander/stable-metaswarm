@@ -12,8 +12,11 @@
     python3 scripts/checks/mutation-check.py scripts/checks/mutations.tsv
     python3 scripts/checks/mutation-check.py <файл.sql> "<мутация>" [ещё…]
 
-Манифест — TSV из трёх колонок: sql-файл, мутация, ожидаемый шаг. Строки,
-начинающиеся с `#`, игнорируются.
+Манифест — TSV: sql-файл, мутация, ожидаемый шаг и необязательный статус.
+Статус `todo: <причина>` означает известный долг — такая мутация считается
+**недоказанной** и видна в итоге отдельным числом, а не исчезает из отчёта.
+Перед мутациями каждый файл прогоняется как есть: красный baseline обесценивает
+любую мутацию. Строки, начинающиеся с `#`, игнорируются.
 
 Мутация записывается одним из трёх способов:
 
@@ -165,18 +168,40 @@ def run_manifest(path: str) -> int:
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         parts = line.split(chr(9))
-        if len(parts) != 3:
-            print("BROKEN строка манифеста не из трёх колонок: %s" % line)
+        if len(parts) == 3:
+            parts.append("active")
+        if len(parts) != 4:
+            print("BROKEN строка манифеста не из 3-4 колонок: %s" % line)
             return 2
         rows.append(parts)
 
-    cache, bad = {}, 0
-    for sql_file, mutation, expected in rows:
+    cache, bad, todo = {}, 0, 0
+
+    # Baseline: без зелёного исходника мутация ничего не доказывает — шаг мог
+    # быть красным и до неё.
+    for sql_file in sorted({r[0] for r in rows}):
         source = cache.setdefault(sql_file,
                                   io.open(sql_file, encoding="utf-8").read())
+        count, steps = run_sql(source)
+        if count != 0:
+            print("BROKEN baseline %s не зелёный: провалено %d (%s)"
+                  % (sql_file, count, ",".join(steps)))
+            return 2
+
+    for sql_file, mutation, expected, status in rows:
+        source = cache[sql_file]
+        if status.startswith("todo"):
+            todo += 1
+            print("TODO   %s → шаг %s: %s"
+                  % (mutation, expected, status.partition(":")[2].strip()
+                     or "сценарий не изолирован"))
+            continue
         if not check_one(source, mutation, expected):
             bad += 1
-    print(chr(10) + "мутаций %d, без доказательной силы %d" % (len(rows), bad))
+
+    active = len(rows) - todo
+    print(chr(10) + "доказано %d / всего %d / TODO %d / без силы %d"
+          % (active - bad, len(rows), todo, bad))
     return 1 if bad else 0
 
 
