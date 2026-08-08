@@ -208,20 +208,16 @@ CREATE TABLE human_question (
   run_id      INTEGER NOT NULL REFERENCES run(id),
   campaign_id INTEGER REFERENCES review_campaign(id),
   round_id    INTEGER REFERENCES review_round(id),
+  finding_id  INTEGER REFERENCES finding(id),
   reason      TEXT    NOT NULL REFERENCES question_reason(reason),
   UNIQUE (id, campaign_id),
   UNIQUE (id, round_id),
   UNIQUE (id, reason),
   FOREIGN KEY (campaign_id, round_id) REFERENCES review_round(campaign_id, id),
+  FOREIGN KEY (campaign_id, run_id)   REFERENCES review_campaign(id, run_id),
+  FOREIGN KEY (finding_id, run_id)    REFERENCES finding(id, run_id),
   CHECK (reason NOT IN ('reconcile_failed', 'reopen_human_closed')
          OR (campaign_id IS NOT NULL AND round_id IS NOT NULL))
-);
-
-CREATE TABLE human_question_observation (
-  question_id    INTEGER NOT NULL REFERENCES human_question(id),
-  observation_id INTEGER NOT NULL REFERENCES review_observation(id),
-  finding_id     INTEGER REFERENCES finding(id),
-  PRIMARY KEY (question_id, observation_id)
 );
 
 CREATE TABLE human_answer (
@@ -229,6 +225,44 @@ CREATE TABLE human_answer (
   question_id INTEGER NOT NULL REFERENCES human_question(id),
   UNIQUE (question_id)
 );
+
+CREATE TABLE human_question_observation (
+  question_id    INTEGER NOT NULL REFERENCES human_question(id),
+  observation_id INTEGER NOT NULL REFERENCES review_observation(id),
+  campaign_id    INTEGER NOT NULL REFERENCES review_campaign(id),
+  round_id       INTEGER NOT NULL REFERENCES review_round(id),
+  run_id         INTEGER NOT NULL REFERENCES run(id),
+  reason         TEXT    NOT NULL REFERENCES question_reason(reason),
+  finding_id     INTEGER REFERENCES finding(id),
+  PRIMARY KEY (question_id, observation_id),
+  FOREIGN KEY (campaign_id, round_id)       REFERENCES review_round(campaign_id, id),
+  FOREIGN KEY (question_id, round_id)       REFERENCES human_question(id, round_id),
+  FOREIGN KEY (question_id, reason)         REFERENCES human_question(id, reason),
+  FOREIGN KEY (observation_id, round_id)    REFERENCES review_observation(id, round_id),
+  FOREIGN KEY (campaign_id, run_id)         REFERENCES review_campaign(id, run_id),
+  FOREIGN KEY (finding_id, run_id)          REFERENCES finding(id, run_id),
+  CHECK (reason IN ('reconcile_failed', 'reopen_human_closed')),
+  CHECK ((reason = 'reopen_human_closed') = (finding_id IS NOT NULL))
+);
+
+CREATE TRIGGER trg_question_observation_immutable
+BEFORE UPDATE ON human_question_observation
+BEGIN
+  SELECT RAISE(ABORT, 'human_question_observation is immutable');
+END;
+
+CREATE TRIGGER trg_question_observation_no_delete
+BEFORE DELETE ON human_question_observation
+BEGIN
+  SELECT RAISE(ABORT, 'human_question_observation rows are never deleted');
+END;
+
+CREATE TRIGGER trg_question_observation_frozen_after_answer
+BEFORE INSERT ON human_question_observation
+BEGIN
+  SELECT RAISE(ABORT, 'question membership is frozen once the answer exists')
+  WHERE EXISTS (SELECT 1 FROM human_answer a WHERE a.question_id = NEW.question_id);
+END;
 
 CREATE TABLE finding_observation_link (
   observation_id        INTEGER PRIMARY KEY REFERENCES review_observation(id),
@@ -581,19 +615,99 @@ SELECT l.observation_id
 INSERT INTO human_question(id, run_id, campaign_id, round_id, reason) VALUES
   (1, 1, 1, 1, 'reconcile_failed'),      -- круг 1 кампании 1
   (2, 1, 1, 1, 'dispute'),
-  (3, 1, 2, 2, 'reconcile_failed'),      -- другая кампания
-  (4, 1, 1, 1, 'reopen_human_closed');   -- pending-запрос с целью
-INSERT INTO human_answer(id, question_id) VALUES (1, 1), (2, 2), (3, 3), (4, 4);
+  (4, 1, 1, 1, 'reopen_human_closed'),   -- pending-запрос с целью
+  (5, 1, 1, 3, 'reconcile_failed');      -- круг 3 той же кампании
 INSERT INTO review_observation(id, campaign_id, round_id, lane_id, attempt_id, subject_id, revision, seq)
 VALUES (11, 1, 1, 3, 4, 1, 'sha-1', 11),
        (12, 1, 1, 1, 1, 1, 'sha-1', 12),
        (13, 1, 1, 1, 1, 1, 'sha-1', 13),
        (14, 1, 3, 1, 6, 1, 'sha-1b', 14),
        (15, 1, 1, 1, 1, 1, 'sha-1', 15);
+-- @step 35q вопрос по кампании другого прогона
+-- @expect error FOREIGN KEY
+INSERT INTO human_question(id, run_id, campaign_id, round_id, reason)
+VALUES (3, 1, 2, 2, 'reconcile_failed');
+
+-- @step 35r членство: вопрос круга 1, наблюдение круга 3
+-- @expect error FOREIGN KEY
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 14, 1, 1, 1, 'reconcile_failed', NULL);
+
+-- @step 35s членство: reopen без цели
+-- @expect error CHECK
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (4, 15, 1, 1, 1, 'reopen_human_closed', NULL);
+
+-- @step 35t членство: reconcile_failed с целью
+-- @expect error CHECK
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 11, 1, 1, 1, 'reconcile_failed', 1);
+
+-- @step 35u членство: причина, у которой членства не бывает
+-- @expect error CHECK
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (2, 11, 1, 1, 1, 'dispute', NULL);
+
+-- @step 35v членство: цель из другого прогона
+-- @expect error FOREIGN KEY
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (4, 15, 1, 1, 1, 'reopen_human_closed', 5);
+
 -- Что человек видел: вопрос 1 — наблюдения 11 и 12; вопрос 4 — наблюдение 15
 -- с зафиксированной целью переоткрытия.
-INSERT INTO human_question_observation(question_id, observation_id, finding_id) VALUES
-  (1, 11, NULL), (1, 12, NULL), (4, 15, 1);
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 11, 1, 1, 1, 'reconcile_failed', NULL),
+       (1, 12, 1, 1, 1, 'reconcile_failed', NULL),
+       (4, 15, 1, 1, 1, 'reopen_human_closed', 1);
+-- @step 35x1 членство: круг строки — круг наблюдения, но не вопроса
+-- @expect error FOREIGN KEY
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 14, 1, 3, 1, 'reconcile_failed', NULL);
+
+-- @step 35x2 членство: кампания строки — кампания наблюдения, но не вопроса
+-- @expect error FOREIGN KEY
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 9, 2, 2, 2, 'reconcile_failed', NULL);
+
+-- @step 35x3 членство: причина строки не совпадает с причиной вопроса
+-- @expect error FOREIGN KEY
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 13, 1, 1, 1, 'reopen_human_closed', 1);
+
+-- @step 35x5 членство: прогон строки не совпадает с прогоном кампании
+-- @expect error FOREIGN KEY
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 13, 1, 1, 2, 'reconcile_failed', NULL);
+
+-- @step 35x4 членство: кампания строки не владеет её кругом
+-- @expect error FOREIGN KEY
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 13, 2, 1, 2, 'reconcile_failed', NULL);
+
+-- @step 35x членство: вопрос кампании 1, наблюдение кампании 2
+-- @expect error FOREIGN KEY
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 9, 1, 1, 1, 'reconcile_failed', NULL);
+
+-- @step 35y повтор строки членства при retry операции
+-- @expect error UNIQUE
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 11, 1, 1, 1, 'reconcile_failed', NULL);
+
+INSERT INTO human_answer(id, question_id) VALUES (1, 1), (2, 2), (4, 4), (5, 5);
+
+-- @step 35z членство: UPDATE задним числом
+-- @expect error immutable
+UPDATE human_question_observation SET observation_id = 13 WHERE question_id = 1;
+
+-- @step 35zz членство: DELETE, чтобы переписать состав
+-- @expect error never deleted
+DELETE FROM human_question_observation WHERE question_id = 1;
+
+-- @step 35w членство нельзя дописать после ответа
+-- @expect error frozen once the answer exists
+INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
+VALUES (1, 13, 1, 1, 1, 'reconcile_failed', NULL);
 
 -- @step 35a человек как запасной reconciler: first_seen без agent attempt
 -- @expect ok
@@ -616,19 +730,19 @@ INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, find
                                      decided_by_human_answer_id, reason)
 VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 2, NULL);
 
--- @step 35d человек: ответ по другой кампании
--- @expect error reconcile_failed or reopen_human_closed
+-- @step 35d человек: ответ по другому кругу той же кампании
+-- @expect error answer of this round
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
                                      decided_by_human_answer_id, reason)
-VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 3, NULL);
+VALUES (13, 1, 1, 1, 'first_seen', NULL, NULL, NULL, 5, NULL);
 
 -- @step 35e оба источника сразу
 -- @expect error CHECK
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
                                      decided_by_attempt_id, decided_by_role, decided_by_outcome,
                                      decided_by_human_answer_id, reason)
-VALUES (12, 1, 1, 1, 'first_seen', 7, 'reconciler', 'succeeded', 1, NULL);
+VALUES (11, 1, 1, 1, 'first_seen', 7, 'reconciler', 'succeeded', 1, NULL);
 
 -- @step 35f ни одного источника
 -- @expect error CHECK

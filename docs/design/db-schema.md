@@ -24,11 +24,13 @@ cross-campaign ссылки, формы строки попытки по рол�
 ревьюера, включая штатный `fix_check` по новой ревизии. Оба воспроизводятся и
 падают ненулевым кодом:
 `python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
-можно передать несколько). Третий прогон, `scope-keys.sql`, — 47 сценариев на
+можно передать несколько). Третий прогон, `scope-keys.sql`, — 63 сценария на
 составные ключи scope из §5.3.1: чужой прогон, чужая кампания, самый тихий
 класс «своя кампания, но чужой круг, линия или попытка» и оба источника
 решения связи — агент и человек, включая привязку ответа к кругу и к набору
-показанных наблюдений.
+показанных наблюдений. Каждый констрейнт этой группы прогнан
+`scripts/checks/mutation-check.py`: снятие ключа обязано красить сценарий,
+иначе тест доказывает не то, что заявлено.
 
 Все три прогона доказывают **констрейнты и cardinality** — какие строки база
 принимает, а какие нет. Атомарность «переход + событие», поведение при падении
@@ -1534,9 +1536,22 @@ review-вопроса появился `round_id` (обязательный дл
 набор вопроса**, а если у строки членства зафиксирован target (случай
 `reopen_human_closed`), то и `finding_id` связи обязан ему совпасть. Одного
 круга мало: reopen-запрос покрывает лишь часть наблюдений круга, и T1.5
-требует полного покрытия именно pending-набора. Кто именно решил — читается из
-того, какая колонка заполнена; отдельного `authority` не нужно, как и в
-`finding_resolution`, где authority выводится из вида закрытия.
+требует полного покрытия именно pending-набора.
+
+Форма target задана **обязательной**, а не опциональной:
+`CHECK ((reason = 'reopen_human_closed') = (finding_id IS NOT NULL))`. Без
+такого равенства оставался обход — записать reopen-членство без цели, и
+проверка «та ли это личность» промолчала бы, потому что сравнивать не с чем.
+У `reconcile_failed`, наоборот, цели нет по смыслу: человек там заменяет
+reconciler и классифицирует наблюдение сам. Сама строка членства при этом
+проверяет свой scope ключами — вопрос и наблюдение обязаны быть из одной
+кампании и одного круга, а target из того же прогона: audit-факт «человек это
+видел» должен быть истинным сам по себе, а не после того, как его отбракует
+создание связи.
+
+Кто именно решил — читается из того, какая колонка заполнена; отдельного
+`authority` не нужно, как и в `finding_resolution`, где authority выводится из
+вида закрытия.
 
 Владельцы путей разные: agent-вариант пишет reconciliation (T1.5/T1.7b),
 human-вариант — обработка ответа в T1.16. Там же владение наполнением
@@ -2667,6 +2682,12 @@ CREATE TABLE human_question (
   UNIQUE (id, round_id),
   UNIQUE (id, reason),
   FOREIGN KEY (campaign_id, round_id) REFERENCES review_round(campaign_id, id),
+  -- Все координаты вопроса — из его прогона. Иначе вопрос показывается в
+  -- одном прогоне, а ответ применяется к кампании другого.
+  FOREIGN KEY (campaign_id, run_id)   REFERENCES review_campaign(id, run_id),
+  FOREIGN KEY (stage_id, run_id)      REFERENCES stage_execution(id, run_id),
+  FOREIGN KEY (branch_id, run_id)     REFERENCES branch(id, run_id),
+  FOREIGN KEY (finding_id, run_id)    REFERENCES finding(id, run_id),
   -- Две причины, где человек классифицирует наблюдения, обязаны нести круг:
   -- без него ответ нельзя отличить от ответа на прошлый круг той же кампании.
   CHECK (reason NOT IN ('reconcile_failed', 'reopen_human_closed')
@@ -2678,14 +2699,44 @@ CREATE TABLE human_question (
 CREATE TABLE human_question_observation (
   question_id    INTEGER NOT NULL REFERENCES human_question(id),
   observation_id INTEGER NOT NULL REFERENCES review_observation(id),
+  campaign_id    INTEGER NOT NULL REFERENCES review_campaign(id),
+  round_id       INTEGER NOT NULL REFERENCES review_round(id),
+  run_id         INTEGER NOT NULL REFERENCES run(id),
+  reason         TEXT    NOT NULL REFERENCES question_reason(reason),
   finding_id     INTEGER REFERENCES finding(id),   -- target у reopen-запроса
-  PRIMARY KEY (question_id, observation_id)
+  PRIMARY KEY (question_id, observation_id),
+  -- Вопрос и наблюдение — из одной кампании и одного круга. Строка «человек
+  -- это видел» обязана быть истинной сама по себе, а не после того, как её
+  -- отбракует создание связи.
+  -- Круг определяет кампанию, поэтому отдельные ключи «вопрос той же
+  -- кампании» и «наблюдение той же кампании» избыточны: достаточно привязать
+  -- к кругу обе стороны и сам круг — к кампании строки.
+  FOREIGN KEY (campaign_id, round_id)       REFERENCES review_round(campaign_id, id),
+  FOREIGN KEY (question_id, round_id)       REFERENCES human_question(id, round_id),
+  FOREIGN KEY (question_id, reason)         REFERENCES human_question(id, reason),
+  FOREIGN KEY (observation_id, round_id)    REFERENCES review_observation(id, round_id),
+  FOREIGN KEY (campaign_id, run_id)         REFERENCES review_campaign(id, run_id),
+  FOREIGN KEY (finding_id, run_id)          REFERENCES finding(id, run_id),
+  -- Членство существует только у двух причин, и форма target у них разная:
+  -- reopen переоткрывает НАЗВАННУЮ личность, а запасной reconciler
+  -- классифицирует наблюдение сам и цели не имеет.
+  CHECK (reason IN ('reconcile_failed', 'reopen_human_closed')),
+  CHECK ((reason = 'reopen_human_closed') = (finding_id IS NOT NULL))
 );
 
 CREATE TRIGGER trg_question_observation_immutable
 BEFORE UPDATE ON human_question_observation
 BEGIN
   SELECT RAISE(ABORT, 'human_question_observation is immutable');
+END;
+
+-- Набор замораживается вместе с вопросом: дописать его после ответа значит
+-- задним числом объявить, что человек видел то, чего не видел.
+CREATE TRIGGER trg_question_observation_frozen_after_answer
+BEFORE INSERT ON human_question_observation
+BEGIN
+  SELECT RAISE(ABORT, 'question membership is frozen once the answer exists')
+  WHERE EXISTS (SELECT 1 FROM human_answer a WHERE a.question_id = NEW.question_id);
 END;
 
 CREATE TRIGGER trg_question_observation_no_delete
