@@ -111,6 +111,7 @@ def main(path: str) -> int:
 
     step, stmt = Step(), ""
     passed = failed = 0
+    failed_ids = []
 
     for line in tail.splitlines(True):
         stripped = line.strip()
@@ -151,6 +152,7 @@ def main(path: str) -> int:
             print("OK    %s" % label)
         else:
             failed += 1
+            failed_ids.append(label.split(" ", 1)[0])
             print("FAIL  %s" % label)
             print("      %s" % problem)
         step.reset()
@@ -161,12 +163,17 @@ def main(path: str) -> int:
         print("FAIL  оборванный statement в конце файла:")
         print("      %s" % stmt.strip().splitlines()[0])
         failed += 1
+        failed_ids.append("<хвост>")
     if step.expect is not None:
         print("FAIL  @expect без statement: %s" % (step.name or "<без подписи>"))
         failed += 1
+        failed_ids.append("<без-statement>")
 
     con.close()
-    print("\nпройдено %d, провалено %d" % (passed, failed))
+    print(chr(10) + "пройдено %d, провалено %d" % (passed, failed))
+    if failed_ids:
+        # Машиночитаемо для mutation-check: какие именно шаги упали.
+        print("FAILED-STEPS: %s" % ",".join(failed_ids))
     return 1 if failed else 0
 
 
