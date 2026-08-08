@@ -88,6 +88,7 @@ flowchart TB
   T112 --> T113[T1.13 артефакты]
   T112 --> T114[T1.14 верификация]
   T13 --> T116[T1.16 человек + CLI-транспорт]
+  T17b --> T116
   T112 --> T110b[T1.10b recovery: внешние эффекты]
   T113 --> T110b
   T116 --> T110b
@@ -374,7 +375,9 @@ discovery к ним добавляется четвёртый — слот кв�
 успешного мнения. Human gate одной транзакцией создаёт branch-scoped
 blocker и переводит ветку в `blocked`, поэтому Run без активного соседа
 показывает `waiting_human`; вопрос форматирует чистый порт только после
-единственного `AskHuman`, а не заранее у вызывающего.
+единственного `AskHuman` и получает его завёрнутым в `AfterCheckGate`, а не
+заранее собранным у вызывающего. Порт возвращает одну presentation; `reason`,
+scope, `snapshot_json` и членство T1.7b пишет из самого запроса.
 Follow-up observation и `recurrence` либо появляются вместе с решением, либо вся
 транзакция откатывается; перед каждым `review_round.result` глобальный запрос
 observations без link пуст. Отдельные негативные фикстуры доказывают, что
@@ -493,12 +496,22 @@ allowlist, кнопки. Транспортно-нейтральный outbox и
 Формирование вопроса, стандартные варианты при исчерпании кругов, разбор ответа,
 переспрос с лимитом, `awaiting_continue`. Транспортно-нейтральный
 `notification_outbox` и отправитель `cli`, выдающий ожидающее по команде `ask`.
-Задача реализует production `HumanGateFormatter`-порт T1.7b: он получает уже
-готовый `HumanGateRequest` — закрытый union из `AfterCheckGate(AskHuman)`,
-`ReconcileFailedGate` и `HumanReopenGate` — и immutable context. `AskHuman` для
-путей Q49 не годится: его `ReviewStopReason` знает только три причины и требует
-`escalated`/`fix_cycle`. Порт не читает БД, не выполняет I/O и не
-выбирает reason.
+Задача владеет **общим** formatter API и реализует production-порт T1.7b. Общий
+закрытый union `HumanGateRequest` покрывает все одиннадцать детерминированных
+причин карты Q51; `open_question` в него не входит — его текст пишет агент.
+Пять причин из одиннадцати — review-домен, и они уже зафиксированы T1.7b как
+`ReviewDecisionGateRequest`: `AfterCheckGate(AskHuman)` для
+`dispute`/`cap_exhausted_*`, `ReconcileFailedGate` и `HumanReopenGate`.
+`AskHuman` для путей Q49 не годится: его `ReviewStopReason` знает только три
+причины и требует `escalated`/`fix_cycle`. Остальные шесть — `lane_failure`,
+`contract_error`, `hang`, `baseline_red`, `approval_gate`,
+`verification_policy` — приходят от порождающих их задач и добавляются в union
+здесь; содержание каждой уже расписано в карте Q51. Реализация T1.16 принимает
+надмножество входов и потому годится там, где T1.7b требует своё подмножество.
+Порт возвращает только presentation — текст, варианты, тело outbox и transport;
+`reason`, scope, snapshot и членство пишет вызывающая транзакция из своего
+запроса, поэтому formatter не может ни сузить scope, ни потерять snapshot. Он
+не читает БД, не выполняет I/O и не выбирает reason.
 Для `dispute`/`cap_exhausted_*` свободный текст обязан свестись в одно
 кампанийное действие; смешанная per-finding раскладка не применяется частично и
 не снимает blocker, а запускает переспрос, после лимита — запрос ключа варианта.
