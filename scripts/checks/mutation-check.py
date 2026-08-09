@@ -11,7 +11,9 @@
 
     python3 scripts/checks/mutation-check.py scripts/checks/mutations.tsv
     python3 scripts/checks/mutation-check.py --coverage scripts/checks/mutations.tsv
+    python3 scripts/checks/mutation-check.py --coverage-baseline scripts/checks/mutations.tsv scripts/checks/debt-baseline.tsv
     python3 scripts/checks/mutation-check.py --schema-sync docs/design/db-schema.md scripts/checks
+    python3 scripts/checks/mutation-check.py --schema-sync-baseline docs/design/db-schema.md scripts/checks scripts/checks/debt-baseline.tsv
     python3 scripts/checks/mutation-check.py <файл.sql> "<мутация>" [ещё…]
 
 `--coverage` отвечает на вопрос, который манифест сам о себе не задаёт: какие
@@ -28,6 +30,11 @@ table-level `CHECK`/FK/`UNIQUE` — как нормализованные эле
 стороны. Непокрытый нормативный constraint считается долгом и даёт ненулевой
 exit, даже если trigger-parity чистая.
 
+Варианты `*-baseline` сравнивают известный долг с точным allow-list: подмножество
+проходит, любой новый ID падает даже при прежнем общем числе. Диагностические
+режимы без baseline по-прежнему возвращают 1 при любом долге и печатают полный
+список.
+
 Манифест — TSV: sql-файл, мутация, ожидаемый шаг и необязательный статус.
 Статус `todo: <причина>` означает известный долг — такая мутация считается
 **недоказанной** и видна в итоге отдельным числом, а не исчезает из отчёта.
@@ -38,6 +45,7 @@ exit, даже если trigger-parity чистая.
 
     <таблица>::<фрагмент>   вырезать строку с фрагментом внутри CREATE TABLE
     TRIGGER:<имя>           удалить блок CREATE TRIGGER целиком
+    INDEX:<имя>             удалить именованный CREATE INDEX целиком
     TRIGGER-WHEN:<имя>::<условие>
                             удалить один верхнеуровневый дизъюнкт WHEN;
                             для любого многосоставного trigger одной строки
@@ -64,7 +72,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from schema_utils import execute_design_schema, table_ddl
+from schema_utils import execute_design_schema, explicit_indexes, table_ddl
 
 RUNNER = Path(__file__).with_name("run-sql-check.py")
 
@@ -77,6 +85,14 @@ def strip_trigger(sql: str, name: str) -> str:
     if end < 0:
         return sql
     return sql[:start] + sql[end + len("END;"):]
+
+
+def strip_index(sql: str, name: str) -> str:
+    pattern = re.compile(
+        r"(?ms)^CREATE\s+(?:UNIQUE\s+)?INDEX\s+" + re.escape(name)
+        + r"\b.*?;\s*"
+    )
+    return pattern.sub("", sql, count=1)
 
 
 def trigger_header(sql: str, name: str):
@@ -243,6 +259,8 @@ def apply_mutation(source: str, mutation: str) -> str:
         return strip_trigger_when_term(source, name, fragment)
     if mutation.startswith("TRIGGER:"):
         return strip_trigger(source, mutation[len("TRIGGER:"):])
+    if mutation.startswith("INDEX:"):
+        return strip_index(source, mutation[len("INDEX:"):])
     if "::" in mutation:
         table, fragment = mutation.split("::", 1)
         return strip_constraint_lines(source, fragment, table)
@@ -381,6 +399,17 @@ def constraints_of(sql: str, referenced):
             found.append((table, item))
     for m in re.finditer(r"CREATE TRIGGER (\w+)", sql):
         found.append((None, "TRIGGER:" + m.group(1)))
+    for m in re.finditer(
+        r"CREATE UNIQUE INDEX\s+(\w+)\s+ON\s+(\w+)\s*\(([^)]*)\)", sql
+    ):
+        name, table, raw_columns = m.groups()
+        columns = tuple(column.strip() for column in raw_columns.split(","))
+        # Явные UNIQUE (id, scope), как и table-level аналоги, существуют
+        # только как parent key составного FK. Их силу доказывает child FK;
+        # отдельный negative case ломал бы DDL как foreign key mismatch.
+        if (table, columns) in referenced:
+            continue
+        found.append((None, "INDEX:" + name))
     return found, dead
 
 
@@ -397,6 +426,8 @@ def addresses(mutation: str):
             yield (None, "TRIGGER:" + name)
         elif part.startswith("TRIGGER:"):
             yield (None, part)
+        elif part.startswith("INDEX:"):
+            yield (None, part)
         elif "::" in part:
             table, fragment = part.split("::", 1)
             yield (table, squash(fragment))
@@ -407,9 +438,9 @@ def addresses(mutation: str):
 def covers(address, constraint) -> bool:
     a_table, a_text = address
     c_table, c_text = constraint
-    if a_text.startswith("TRIGGER:"):
+    if a_text.startswith(("TRIGGER:", "INDEX:")):
         return a_text == c_text
-    if c_text.startswith("TRIGGER:"):
+    if c_text.startswith(("TRIGGER:", "INDEX:")):
         return False
     if a_table not in ("*", c_table):
         return False
@@ -439,7 +470,52 @@ def normalized_trigger(block: str) -> str:
     return squash(strip_comments(block))
 
 
-def run_schema_sync(design_path: str, scenario_dir: str) -> int:
+def read_debt_baseline(path: str):
+    allowed = {
+        "coverage_constraints", "schema_constraints", "schema_unique_indexes"
+    }
+    values = {metric: set() for metric in allowed}
+    for line_no, raw in enumerate(io.open(path, encoding="utf-8"), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(chr(9))
+        if len(parts) != 2 or parts[0] not in allowed or not parts[1]:
+            raise ValueError("неверная строка debt baseline %s:%d" % (path, line_no))
+        if parts[1] in values[parts[0]]:
+            raise ValueError("дубль debt baseline %s:%d" % (path, line_no))
+        values[parts[0]].add(parts[1])
+    return values
+
+
+def debt_regressed(metric: str, actual, baseline) -> bool:
+    actual = set(actual)
+    if baseline is None:
+        return bool(actual)
+    expected = baseline[metric]
+    added = sorted(actual - expected)
+    removed = sorted(expected - actual)
+    if added:
+        print("DEBT-REGRESSION %s: baseline %d, стало %d, новых %d"
+              % (metric, len(expected), len(actual), len(added)))
+        for item in added:
+            print("  NEW-DEBT %s" % item)
+        return True
+    if removed:
+        print("DEBT-IMPROVEMENT %s: baseline %d, стало %d; обновите baseline"
+              % (metric, len(expected), len(actual)))
+    else:
+        print("DEBT-OK %s: %d" % (metric, len(actual)))
+    return False
+
+
+def constraint_key(constraint) -> str:
+    table, text = constraint
+    return text if table is None else "%s::%s" % (table, text)
+
+
+def run_schema_sync(design_path: str, scenario_dir: str,
+                    debt_baseline=None) -> int:
     """Сверить trigger'ы и table constraints design со стабами в обе стороны."""
     design = io.open(design_path, encoding="utf-8").read()
     normative_rows = trigger_blocks(design)
@@ -512,15 +588,19 @@ def run_schema_sync(design_path: str, scenario_dir: str) -> int:
         normative_con.execute("PRAGMA recursive_triggers = ON")
         execute_design_schema(normative_con, design)
         normative_tables = table_ddl(normative_con)
+        normative_indexes = explicit_indexes(normative_con)
         normative_con.close()
 
         scenario_tables = {}
+        scenario_indexes = {}
         for path in scenarios:
             source = io.open(path, encoding="utf-8").read()
             ddl = source.partition("-- === данные ===")[0]
             con = sqlite3.connect(":memory:")
             con.executescript(ddl)
-            scenario_tables[str(path).replace("\\", "/")] = table_ddl(con)
+            location = str(path).replace("\\", "/")
+            scenario_tables[location] = table_ddl(con)
+            scenario_indexes[location] = explicit_indexes(con)
             con.close()
     except (sqlite3.Error, ValueError) as exc:
         print("BROKEN table parity: %s: %s" % (type(exc).__name__, exc))
@@ -550,8 +630,9 @@ def run_schema_sync(design_path: str, scenario_dir: str) -> int:
     extra_constraints = sorted(scenario_set - normative_set)
     covered_constraints = len(normative_set & scenario_set)
 
-    for table, constraint in missing_constraints:
-        print("MISSING-CONSTRAINT  %s::%s" % (table, constraint))
+    if debt_baseline is None:
+        for table, constraint in missing_constraints:
+            print("MISSING-CONSTRAINT  %s::%s" % (table, constraint))
     for constraint in extra_constraints:
         table, text = constraint
         print("EXTRA-CONSTRAINT    %s::%s — %s" % (
@@ -572,13 +653,78 @@ def run_schema_sync(design_path: str, scenario_dir: str) -> int:
             len(normative_dead) + len(scenario_dead),
         )
     )
-    constraint_bad = bool(
-        missing_constraints or extra_constraints or normative_dead or scenario_dead
+    constraint_missing_bad = debt_regressed(
+        "schema_constraints",
+        {constraint_key(item) for item in missing_constraints},
+        debt_baseline,
     )
-    return 1 if trigger_bad or constraint_bad else 0
+    constraint_bad = bool(
+        constraint_missing_bad or extra_constraints
+        or normative_dead or scenario_dead
+    )
+
+    def normalize_indexes(rows):
+        return {
+            name: squash(strip_comments(sql)).rstrip(";")
+            for name, sql in rows.items()
+            if re.match(r"(?i)^CREATE\s+UNIQUE\s+INDEX\b", sql.lstrip())
+        }
+
+    normative_unique = normalize_indexes(normative_indexes)
+    actual_unique = {}
+    index_locations = {}
+    index_conflicts = set()
+    for location, rows in scenario_indexes.items():
+        for name, body in normalize_indexes(rows).items():
+            if name in actual_unique and actual_unique[name] != body:
+                index_conflicts.add(name)
+            actual_unique.setdefault(name, body)
+            index_locations.setdefault(name, []).append(location)
+
+    missing_indexes = sorted(set(normative_unique) - set(actual_unique))
+    extra_indexes = sorted(set(actual_unique) - set(normative_unique))
+    different_indexes = sorted(
+        name for name in set(normative_unique) & set(actual_unique)
+        if normative_unique[name] != actual_unique[name]
+    )
+    matched_indexes = (
+        len(set(normative_unique) & set(actual_unique)) - len(different_indexes)
+    )
+    if debt_baseline is None:
+        for name in missing_indexes:
+            print("MISSING-UNIQUE-INDEX  %s" % name)
+    for name in extra_indexes:
+        print("EXTRA-UNIQUE-INDEX    %s — %s" % (
+            name, ", ".join(index_locations[name])
+        ))
+    for name in different_indexes:
+        print("DIFF-UNIQUE-INDEX     %s — %s" % (
+            name, ", ".join(index_locations[name])
+        ))
+    for name in sorted(index_conflicts):
+        print("CONFLICT-UNIQUE-INDEX %s — %s" % (
+            name, ", ".join(index_locations[name])
+        ))
+
+    print(
+        "unique indexes: нормативных %d / в сценариях %d / совпало %d / "
+        "без сценария %d / расходятся %d / лишних %d / конфликтов %d"
+        % (
+            len(normative_unique), len(actual_unique), matched_indexes,
+            len(missing_indexes), len(different_indexes), len(extra_indexes),
+            len(index_conflicts),
+        )
+    )
+    index_missing_bad = debt_regressed(
+        "schema_unique_indexes", set(missing_indexes), debt_baseline
+    )
+    index_bad = bool(
+        index_missing_bad or extra_indexes or different_indexes or index_conflicts
+    )
+    return 1 if trigger_bad or constraint_bad or index_bad else 0
 
 
-def run_coverage(path: str) -> int:
+def run_coverage(path: str, debt_baseline=None) -> int:
     """Какие ограничения sql-файлов не имеют ни одной строки манифеста.
 
     Разрыв покрытия руками не ищется: правило «каждое ограничение — своя
@@ -698,10 +844,14 @@ def run_coverage(path: str) -> int:
         if (sql_file, name) not in used_exemptions
     ]
 
-    for constraint in sorted(missing, key=lambda c: (where[c][0], c[0] or "", c[1])):
-        table, text = constraint
-        address = text if table is None else "%s::%s" % (table, text)
-        print("%s%s%s%s<шаг>" % (where[constraint][0], chr(9), address, chr(9)))
+    if debt_baseline is None:
+        for constraint in sorted(
+            missing, key=lambda c: (where[c][0], c[0] or "", c[1])
+        ):
+            address = constraint_key(constraint)
+            print("%s%s%s%s<шаг>" % (
+                where[constraint][0], chr(9), address, chr(9)
+            ))
 
     for sql_file, name, reason in broken_annotations:
         print("BROKEN granular %s: trigger %s — %s"
@@ -735,7 +885,11 @@ def run_coverage(path: str) -> int:
              len(expected_update_columns) - len(missing_update_columns),
              len(missing_update_columns), len(broken_update_annotations)))
     print("явных granular-исключений %d" % len(exemption_rows))
-    return 1 if (missing or dead or missing_branches or broken_annotations
+    missing_bad = debt_regressed(
+        "coverage_constraints", {constraint_key(item) for item in missing},
+        debt_baseline,
+    )
+    return 1 if (missing_bad or dead or missing_branches or broken_annotations
                  or missing_update_columns or broken_update_annotations
                  or invalid_exemptions) else 0
 
@@ -784,8 +938,22 @@ def main(argv) -> int:
 
     if len(argv) == 3 and argv[1] == "--coverage":
         return run_coverage(argv[2])
+    if len(argv) == 4 and argv[1] == "--coverage-baseline":
+        try:
+            baseline = read_debt_baseline(argv[3])
+        except ValueError as exc:
+            print("BROKEN %s" % exc)
+            return 2
+        return run_coverage(argv[2], baseline)
     if len(argv) == 4 and argv[1] == "--schema-sync":
         return run_schema_sync(argv[2], argv[3])
+    if len(argv) == 5 and argv[1] == "--schema-sync-baseline":
+        try:
+            baseline = read_debt_baseline(argv[4])
+        except ValueError as exc:
+            print("BROKEN %s" % exc)
+            return 2
+        return run_schema_sync(argv[2], argv[3], baseline)
     if len(argv) == 2 and argv[1].endswith(".tsv"):
         return run_manifest(argv[1])
     if len(argv) < 3:

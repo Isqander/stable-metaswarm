@@ -71,3 +71,14 @@ def table_ddl(connection: sqlite3.Connection) -> str:
         "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     )
     return ";\n".join(row[0] for row in rows if row[0]) + ";\n"
+
+
+def explicit_indexes(connection: sqlite3.Connection):
+    """Именованные индексы; внутренние autoindex'ы table constraints не входят."""
+    return {
+        row[0]: row[1]
+        for row in connection.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type='index' AND sql IS NOT NULL ORDER BY name"
+        )
+    }

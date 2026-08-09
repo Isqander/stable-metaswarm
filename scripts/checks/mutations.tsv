@@ -2,7 +2,8 @@
 # Проверка проходит, только если после снятия ограничения покраснел именно
 # этот шаг. Запуск: python3 scripts/checks/mutation-check.py scripts/checks/mutations.tsv
 #
-# Мутация: «<таблица>::<фрагмент>» | «TRIGGER:<имя>» | «<фрагмент>».
+# Мутация: «<таблица>::<фрагмент>» | «INDEX:<имя>» |
+# «TRIGGER:<имя>» | «<фрагмент>».
 # Адресация по таблице обязательна там, где фрагмент встречается не один раз.
 
 # --- schema-constraints: C-21/C-23 ---
@@ -10,6 +11,12 @@ scripts/checks/schema-constraints.sql	stage_execution::CHECK (max_author_revisio
 scripts/checks/schema-constraints.sql	severity_override::UNIQUE (finding_id, event_id)	11
 scripts/checks/schema-constraints.sql	TRIGGER:trg_severity_override_immutable	16
 scripts/checks/schema-constraints.sql	TRIGGER:trg_severity_override_no_delete	18
+
+# --- task-graph-constraints: базовая половина инварианта 23 ---
+scripts/checks/task-graph-constraints.sql	task::UNIQUE (import_id, semantic_task_id)	02
+scripts/checks/task-graph-constraints.sql	INDEX:ux_task_active_semantic	04
+scripts/checks/task-graph-constraints.sql	task_dependency::CHECK (parent_task_id <> child_task_id)	06
+scripts/checks/task-graph-constraints.sql	task_dependency::PRIMARY KEY (parent_task_id, child_task_id)	08
 
 # --- attempt-lifecycle: C-07/C-08 ---
 scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.outcome IS NOT NULL	02a
@@ -60,6 +67,9 @@ scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_link_immutable	32
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_link_no_delete	33
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_resolution_immutable	34
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_resolution_no_delete	35
+
+# --- partial UNIQUE активной попытки ---
+scripts/checks/roster-model.sql	INDEX:ux_attempt_active	03
 
 # --- audit-lifecycle: показанный вопрос, принятый ответ, решение owner ---
 scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::id	02a

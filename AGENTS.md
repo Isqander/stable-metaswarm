@@ -197,6 +197,23 @@ SQLite-схем. Это ловит ограничение, которого не
 инлайновые одноколоночные FK и родительские `UNIQUE (id, <scope>)` исключаются
 по тем же явно названным причинам, что в structural coverage.
 
+Ненулевой известный долг не делает эти команды непригодными для гейта. Для
+гейта используются варианты с точным машинным allow-list:
+
+```text
+python3 scripts/checks/mutation-check.py --coverage-baseline scripts/checks/mutations.tsv scripts/checks/debt-baseline.tsv
+python3 scripts/checks/mutation-check.py --schema-sync-baseline docs/design/db-schema.md scripts/checks scripts/checks/debt-baseline.tsv
+```
+
+Тот же набор или его подмножество проходит, любой новый ID падает даже при
+прежнем общем числе; уменьшение требует сократить baseline следующим коммитом.
+Добавлять строку в `debt-baseline.tsv`, чтобы сделать регрессию зелёной, нельзя
+без отдельного review-обоснования.
+`--schema-sync` также сверяет все явные `UNIQUE INDEX`: supporting-индексы под
+составные FK проверяются parity, а семантические partial UNIQUE обязаны иметь
+свой mutation-свидетель. Обычные `ix_*` — performance-объекты, не constraint-
+долг; их полный inventory держит `--design-schema`.
+
 После последней schema-правки запускается и связный прогон нормативных SQL-
 блоков:
 `python3 scripts/checks/run-sql-check.py --design-schema docs/design/db-schema.md`.
