@@ -782,6 +782,79 @@ INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, find
                                      decided_by_human_answer_id, reason)
 VALUES (15, 1, 1, 5, 'reopening', NULL, NULL, NULL, 4, 'чужая цель');
 
+-- Провалившаяся попытка того же круга и два свежих наблюдения: шаги ниже
+-- доказывают ограничения, которые до сих пор держались без контрпримера.
+INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id, subject_revision, outcome)
+VALUES (14, 1, 1, 'reconciler', 1, 1, NULL, 'sha-1', 'failed');
+INSERT INTO review_observation(id, campaign_id, round_id, lane_id, attempt_id, subject_id, revision, seq)
+VALUES (17, 1, 1, 1, 1, 1, 'sha-1', 17),
+       (18, 1, 1, 1, 1, 1, 'sha-1', 18);
+-- Свободное наблюдение кампании 2: у наблюдения 9 личность уже есть.
+INSERT INTO review_observation(id, campaign_id, round_id, lane_id, attempt_id, subject_id, revision, seq)
+VALUES (19, 2, 2, 2, 2, 2, 'sha-2', 2);
+
+-- @step 35L1 связь: попытка есть, роль не записана
+-- @expect error CHECK
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome,
+                                     decided_by_human_answer_id, reason)
+VALUES (17, 1, 1, 1, 'first_seen', 7, NULL, 'succeeded', NULL, NULL);
+
+-- @step 35L2 связь: попытка есть, исход не записан
+-- @expect error CHECK
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome,
+                                     decided_by_human_answer_id, reason)
+VALUES (17, 1, 1, 1, 'first_seen', 7, 'reconciler', NULL, NULL, NULL);
+
+-- @step 35L3 связь подписана провалившейся попыткой
+-- @expect error CHECK
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome,
+                                     decided_by_human_answer_id, reason)
+VALUES (17, 1, 1, 1, 'first_seen', 14, 'reconciler', 'failed', NULL, NULL);
+
+-- @step 35L5 переоткрытие без причины
+-- @expect error CHECK
+INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,
+                                     decided_by_attempt_id, decided_by_role, decided_by_outcome,
+                                     decided_by_human_answer_id, reason)
+VALUES (15, 1, 1, 1, 'reopening', NULL, NULL, NULL, 4, NULL);
+
+-- @step 35F1 личность заявляет ревизию, которой её первое наблюдение не несёт
+-- @expect error FOREIGN KEY
+INSERT INTO finding(id, run_id, subject_id, first_campaign_id, first_round_id,
+                    first_observation_id, first_revision, first_owner_lane_id)
+VALUES (6, 1, 1, 1, 3, 8, 'sha-1', 1);
+
+-- @step 35F2 личность: первое наблюдение из другой кампании
+-- @expect error FOREIGN KEY
+INSERT INTO finding(id, run_id, subject_id, first_campaign_id, first_round_id,
+                    first_observation_id, first_revision, first_owner_lane_id)
+VALUES (6, 1, 1, 1, 1, 19, 'sha-2', 1);
+
+-- @step 35F4 личность: первый круг принадлежит другой кампании
+-- @expect error FOREIGN KEY
+INSERT INTO finding(id, run_id, subject_id, first_campaign_id, first_round_id,
+                    first_observation_id, first_revision, first_owner_lane_id)
+VALUES (6, 1, 1, 1, 2, 19, 'sha-2', 1);
+
+-- @step 35F3 личность: предмет не тот, что проверяет её кампания
+-- @expect error FOREIGN KEY
+INSERT INTO finding(id, run_id, subject_id, first_campaign_id, first_round_id,
+                    first_observation_id, first_revision, first_owner_lane_id)
+VALUES (6, 1, 4, 1, 1, 18, 'sha-1', 1);
+
+-- @step 35Q1 вопрос: круг принадлежит другой кампании
+-- @expect error FOREIGN KEY
+INSERT INTO human_question(id, run_id, campaign_id, round_id, reason)
+VALUES (6, 1, 1, 2, 'dispute');
+
+-- @step 35Q2 вопрос: цель из другого прогона
+-- @expect error FOREIGN KEY
+INSERT INTO human_question(id, run_id, campaign_id, round_id, finding_id, reason)
+VALUES (6, 1, 1, 1, 5, 'dispute');
+
 -- @step 35j reopen: переоткрытие своей цели
 -- @expect ok
 INSERT INTO finding_observation_link(observation_id, campaign_id, round_id, finding_id, link_type,

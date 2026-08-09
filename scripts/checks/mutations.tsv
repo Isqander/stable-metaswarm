@@ -88,3 +88,20 @@ scripts/checks/campaign-open.sql	reviewer_exposure::FOREIGN KEY (first_attempt_i
 scripts/checks/campaign-open.sql	reviewer_exposure::FOREIGN KEY (run_id, profile_id, provider, model)	26
 scripts/checks/campaign-open.sql	reviewer_exposure::FOREIGN KEY (first_attempt_id, campaign_id)	27
 scripts/checks/campaign-open.sql	reviewer_exposure::FOREIGN KEY (first_attempt_id, run_id)	32h
+
+# --- scope-keys: форма связи и подпись решения ---
+scripts/checks/scope-keys.sql	finding_observation_link::CHECK ((decided_by_attempt_id IS NULL) = (decided_by_role IS NULL))	35L1
+scripts/checks/scope-keys.sql	finding_observation_link::CHECK ((decided_by_attempt_id IS NULL) = (decided_by_outcome IS NULL))	35L2
+scripts/checks/scope-keys.sql	finding_observation_link::CHECK (decided_by_outcome IS NULL OR decided_by_outcome = 'succeeded')	35L3
+scripts/checks/scope-keys.sql	finding_observation_link::CHECK (link_type <> 'reopening' OR reason IS NOT NULL)	35L5
+
+# --- scope-keys: координаты личности ---
+scripts/checks/scope-keys.sql	finding::FOREIGN KEY (first_observation_id, first_revision)	35F1
+scripts/checks/scope-keys.sql	finding::FOREIGN KEY (first_observation_id, first_campaign_id) && finding::FOREIGN KEY (first_observation_id, first_round_id)	35F2
+scripts/checks/scope-keys.sql	finding::FOREIGN KEY (first_campaign_id, first_round_id) && finding::FOREIGN KEY (first_observation_id, first_campaign_id)	35F4
+scripts/checks/scope-keys.sql	finding::FOREIGN KEY (first_campaign_id, subject_id)	35F3
+
+# --- scope-keys: координаты вопроса ---
+scripts/checks/scope-keys.sql	human_question::FOREIGN KEY (campaign_id, round_id)	35Q1
+scripts/checks/scope-keys.sql	human_question::FOREIGN KEY (finding_id, run_id)	35Q2
+scripts/checks/scope-keys.sql	finding_observation_link::CHECK (decided_by_role IS NULL OR decided_by_role IN ('reviewer', 'reconciler'))	35L4	todo: избыточен при действующих CHECK формы step_attempt — author/planner не имеют campaign_id и round_id, поэтому подписать связь не могут; изолированный контрпример потребовал бы подготовки, невалидной по реальной схеме

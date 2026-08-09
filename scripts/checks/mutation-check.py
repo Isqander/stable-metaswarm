@@ -7,10 +7,18 @@
 заводится мутация и **назначенный шаг**; проверка проходит, только если после
 снятия ограничения этот шаг оказался среди упавших.
 
-Два режима:
+Три режима:
 
     python3 scripts/checks/mutation-check.py scripts/checks/mutations.tsv
+    python3 scripts/checks/mutation-check.py --coverage scripts/checks/mutations.tsv
     python3 scripts/checks/mutation-check.py <файл.sql> "<мутация>" [ещё…]
+
+`--coverage` отвечает на вопрос, который манифест сам о себе не задаёт: какие
+ограничения sql-файлов **не имеют ни одной строки**. Прогон по манифесту может
+быть «68 из 68» при том, что двенадцать констрейнтов в него просто не попали, —
+и такой разрыв ищется руками ровно до первого пропуска. Режим печатает
+недостающие строки в формате манифеста, чтобы их оставалось только заполнить
+шагом, и возвращает ненулевой код, пока разрыв есть.
 
 Манифест — TSV: sql-файл, мутация, ожидаемый шаг и необязательный статус.
 Статус `todo: <причина>` означает известный долг — такая мутация считается
@@ -161,7 +169,7 @@ def check_one(source: str, mutation: str, expected: str) -> bool:
     return False
 
 
-def run_manifest(path: str) -> int:
+def read_manifest(path: str):
     rows = []
     for raw in io.open(path, encoding="utf-8"):
         line = raw.rstrip(chr(10))
@@ -171,9 +179,140 @@ def run_manifest(path: str) -> int:
         if len(parts) == 3:
             parts.append("active")
         if len(parts) != 4:
-            print("BROKEN строка манифеста не из 3-4 колонок: %s" % line)
-            return 2
+            raise ValueError("строка манифеста не из 3-4 колонок: %s" % line)
         rows.append(parts)
+    return rows
+
+
+def squash(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def split_top_level(body: str):
+    """Разбить тело CREATE TABLE по запятым нулевого уровня вложенности."""
+    items, depth, start = [], 0, 0
+    for i, ch in enumerate(body):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            items.append(body[start:i])
+            start = i + 1
+    items.append(body[start:])
+    return [squash(strip_comments(item)) for item in items]
+
+
+def strip_comments(text: str) -> str:
+    return re.sub(r"--[^\n]*", "", text)
+
+
+def constraints_of(sql: str):
+    """Все ограничения уровня таблицы и триггеры файла.
+
+    Инлайновые `REFERENCES`/`NOT NULL` в объявлении колонки сюда не входят
+    намеренно: одноколоночная ссылка на родителя — тривиальный случай, ради
+    которого сценарии scope не пишутся, а FK на закрытые справочники доказывает
+    отдельный манифест T1.3. Граница названа здесь, чтобы «покрыто N из N» не
+    означало большего, чем есть.
+    """
+    # Родительские ключи составных FK: `UNIQUE (id, run_id)` существует не как
+    # самостоятельное правило, а чтобы на него можно было сослаться. Снять его
+    # значит не ослабить проверку, а сломать схему: SQLite отвечает «foreign key
+    # mismatch» на каждую вставку через зависимый ключ, краснеет пол-файла, и
+    # назначенный шаг доказывает не своё. Такие UNIQUE из отчёта исключаются —
+    # их держит сам факт, что зависимый FK работает.
+    referenced = set()
+    for m in re.finditer(r"REFERENCES (\w+)\s*\(([^)]*)\)", sql):
+        cols = tuple(c.strip() for c in m.group(2).split(","))
+        referenced.add((m.group(1), cols))
+
+    found = []
+    for m in re.finditer(r"CREATE TABLE (\w+) \(", sql):
+        table, start = m.group(1), m.end()
+        depth, i = 1, start
+        while i < len(sql) and depth:
+            if sql[i] == "(":
+                depth += 1
+            elif sql[i] == ")":
+                depth -= 1
+            i += 1
+        for item in split_top_level(sql[start:i - 1]):
+            if not re.match(r"(FOREIGN KEY|CHECK|UNIQUE)\b", item):
+                continue
+            unique = re.match(r"UNIQUE\s*\(([^)]*)\)$", item)
+            if unique:
+                cols = tuple(c.strip() for c in unique.group(1).split(","))
+                if (table, cols) in referenced:
+                    continue
+            found.append((table, item))
+    for m in re.finditer(r"CREATE TRIGGER (\w+)", sql):
+        found.append((None, "TRIGGER:" + m.group(1)))
+    return found
+
+
+def addresses(mutation: str):
+    for part in mutation.split(" && "):
+        part = part.strip()
+        if part.startswith("TRIGGER:"):
+            yield (None, part)
+        elif "::" in part:
+            table, fragment = part.split("::", 1)
+            yield (table, squash(fragment))
+        else:
+            yield ("*", squash(part))
+
+
+def covers(address, constraint) -> bool:
+    a_table, a_text = address
+    c_table, c_text = constraint
+    if a_text.startswith("TRIGGER:"):
+        return a_text == c_text
+    if c_text.startswith("TRIGGER:"):
+        return False
+    if a_table not in ("*", c_table):
+        return False
+    return a_text in c_text
+
+
+def run_coverage(path: str) -> int:
+    """Какие ограничения sql-файлов не имеют ни одной строки манифеста.
+
+    Разрыв покрытия руками не ищется: правило «каждое ограничение — своя
+    мутация» проверяемо механически, и без этого режима оно держится на
+    внимательности того, кто правил DDL последним.
+    """
+    rows = read_manifest(path)
+
+    # Счёт по различимым ограничениям, а не по их копиям в стабах: один и тот
+    # же ключ живёт в двух-трёх сценарных файлах, но доказать его достаточно
+    # один раз — в том, где он несущий. Поэтому и адреса берутся из всего
+    # манифеста, а не только из строк своего файла.
+    where = {}
+    for sql_file in sorted({r[0] for r in rows}):
+        sql = io.open(sql_file, encoding="utf-8").read()
+        for constraint in constraints_of(sql):
+            where.setdefault(constraint, []).append(sql_file)
+
+    addrs = [a for _f, mutation, _e, _s in rows for a in addresses(mutation)]
+    missing = [c for c in where if not any(covers(a, c) for a in addrs)]
+
+    for constraint in sorted(missing, key=lambda c: (where[c][0], c[0] or "", c[1])):
+        table, text = constraint
+        address = text if table is None else "%s::%s" % (table, text)
+        print("%s%s%s%s<шаг>" % (where[constraint][0], chr(9), address, chr(9)))
+
+    print(chr(10) + "ограничений %d / покрыто %d / без строки %d"
+          % (len(where), len(where) - len(missing), len(missing)))
+    return 1 if missing else 0
+
+
+def run_manifest(path: str) -> int:
+    try:
+        rows = read_manifest(path)
+    except ValueError as exc:
+        print("BROKEN %s" % exc)
+        return 2
 
     cache, bad, todo = {}, 0, 0
 
@@ -210,6 +349,8 @@ def main(argv) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
+    if len(argv) == 3 and argv[1] == "--coverage":
+        return run_coverage(argv[2])
     if len(argv) == 2 and argv[1].endswith(".tsv"):
         return run_manifest(argv[1])
     if len(argv) < 3:
