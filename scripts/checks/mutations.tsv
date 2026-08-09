@@ -5,6 +5,20 @@
 # Мутация: «<таблица>::<фрагмент>» | «TRIGGER:<имя>» | «<фрагмент>».
 # Адресация по таблице обязательна там, где фрагмент встречается не один раз.
 
+# --- attempt-lifecycle: C-07/C-08 ---
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_attempt_initial_state	02
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_attempt_finish_once	03a
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_attempt_no_delete	11
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_round_initial_state	21
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_round_finish_once	22
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_round_no_delete	28
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_observation_immutable	30
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_observation_no_delete	31
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_link_immutable	32
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_link_no_delete	33
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_resolution_immutable	34
+scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_resolution_no_delete	35
+
 # --- scope-keys: корень scope ---
 scripts/checks/scope-keys.sql	review_campaign::FOREIGN KEY (stage_id, run_id)	01
 scripts/checks/scope-keys.sql	review_campaign::FOREIGN KEY (subject_id, run_id)	02

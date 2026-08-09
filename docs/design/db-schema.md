@@ -1,7 +1,10 @@
 # Схема состояния: SQLite
 
-**Инвентарь ниже устарел намеренно.** Числа `61/24/6/6` относятся к шестой
-редакции; после неё вошли модель effective roster (C-01b) — **+2 таблицы,
+**Текущий инвентарь после C-07/C-08:** **65 таблиц, 33 явных индекса,
+7 представлений и 37 триггеров**. Числа получены механическим подсчётом
+нормативных `CREATE`-операторов; 27 закрытых справочников не изменились.
+Исторические числа `61/24/6/6` относятся к шестой редакции; после неё вошли
+модель effective roster (C-01b) — **+2 таблицы,
 +2 индекса, +1 представление, +9 триггеров** — и schema-effects C-01a/C-01c и
 C-04: **+1 таблица** (`campaign_transition`), **+4 индекса**, **+8 триггеров**,
 плюс новые колонки: `review_campaign.expected_lane_count`,
@@ -10,15 +13,17 @@ C-04: **+1 таблица** (`campaign_transition`), **+4 индекса**, **+8
 `subject_revision`. Составные FK по C-06 **внесены 2026-08-07** (§5.3.1) и имеют собственную
 дельту, которую нельзя приписывать группе выше: **+1 таблица**
 (`human_question_observation`), денормализованные scope-колонки с парными
-`UNIQUE (id, <scope>)` и **+5 триггеров** — два на связь наблюдения с личностью
-и три на членство вопроса. Соответственно у C-01a/C-01c и C-04 остаётся
+`UNIQUE (id, <scope>)`, **+3 явных индекса** для составных FK попытки и
+**+5 триггеров** — два на связь наблюдения с личностью и три на членство
+вопроса. Соответственно у C-01a/C-01c и C-04 остаётся
 `campaign_transition` и восемь триггеров: переходы, начальное состояние и
 снимок кампании, границы индекса линии, неизменяемость и запрет удаления у
 допуска и у резолюции профиля. Остальные schema-effects того же свода (триггеры
-`BEFORE DELETE` по C-07 и C-08, ограничение `max_author_revisions`) вносятся
-одним DDL-заходом следом. Связный
-прогон DDL и пересчёт inventory выполняются **один раз** после него, чтобы не
-считать одно и то же дважды. Конструкции effective roster при этом уже
+`max_author_revisions >= 1` и `UNIQUE(finding_id, event_id)`) вносятся
+следом; они не добавляют именованных schema-объектов и текущий inventory не
+меняют. Связный прогон DDL всё равно повторяется после них, чтобы проверить не
+только число объектов, но и полный набор ограничений. Конструкции effective
+roster при этом уже
 проверены отдельным прогоном на SQLite 3.45: 52 сценария с машинными
 ожиданиями, включая контрпример «одна линия вернула `[]`, вторая не
 завершилась», замену исполнителя, повтор замены после падения, запрет
@@ -26,17 +31,22 @@ C-04: **+1 таблица** (`campaign_transition`), **+4 индекса**, **+8
 cross-campaign ссылки, формы строки попытки по роли и попытку потратить один
 ответ человека дважды. Второй прогон, `campaign-open.sql`, — 45 сценариев по
 открытию кампании, матрице переходов, неизменяемости снимка и допуску
-ревьюера, включая штатный `fix_check` по новой ревизии. Оба воспроизводятся и
-падают ненулевым кодом:
-`python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
-можно передать несколько). Третий прогон, `scope-keys.sql`, — 76 сценариев на
+ревьюера, включая штатный `fix_check` по новой ревизии. Третий прогон,
+`scope-keys.sql`, — 76 сценариев на
 составные ключи scope из §5.3.1: чужой прогон, чужая кампания, самый тихий
 класс «своя кампания, но чужой круг, линия или попытка» и оба источника
 решения связи — агент и человек, включая привязку ответа к кругу и к набору
 показанных наблюдений. Доказательная сила проверена отдельно:
 `scripts/checks/mutations.tsv` держит для ограничения назначенный шаг, и
 `mutation-check.py` требует, чтобы после снятия ограничения покраснел именно он.
-Доказаны 78 мутационных случаев из 79 (случай может снимать несколько
+Четвёртый прогон, `attempt-lifecycle.sql`, — 49 сценариев на C-07/C-08:
+active/open начальную форму, неизменяемость каждого input/scope-поля, единственный
+terminal-переход попытки и круга и запрет UPDATE/DELETE evidence-строк.
+Все четыре воспроизводятся одной командой и падают ненулевым кодом при любом
+расхождении ожиданий:
+`python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
+можно передать несколько).
+Доказаны 90 мутационных случаев из 91 (случай может снимать несколько
 перекрывающихся ключей сразу), один — признанный долг; манифест умеет держать и признанный долг
 (`todo: <причина>`), который считается недоказанным и виден в итоге отдельным
 числом.
@@ -44,7 +54,7 @@ cross-campaign ссылки, формы строки попытки по рол�
 **Покрытие манифеста неполное, и это счётная величина, а не оценка.** Режим
 `mutation-check.py --coverage scripts/checks/mutations.tsv` перечисляет
 ограничения сценарных файлов, у которых нет ни одной строки манифеста: на
-2026-08-09 таких **44 из 124**. Отдельным списком тот же режим печатает
+2026-08-09 таких **44 из 136**. Отдельным списком тот же режим печатает
 **мёртвые ключи** — `UNIQUE`, куда входит первичный ключ, и на который никто не
 ссылается: отвергнуть строку он не может (PK уже уникален), значит ему нужна не
 мутация, а удаление. Найдено и удалено два, сейчас счётчик 0. Разница между «нет строки вовсе» и «строка есть,
@@ -55,7 +65,7 @@ cross-campaign ссылки, формы строки попытки по рол�
 родительские `UNIQUE (id, <scope>)` составных ключей — их снятие не ослабляет
 проверку, а ломает схему, и «назначенный шаг» для них ничего не значит.
 
-Все три прогона доказывают **констрейнты и cardinality** — какие строки база
+Все четыре прогона доказывают **констрейнты и cardinality** — какие строки база
 принимает, а какие нет. Атомарность «переход + событие», поведение при падении
 между операциями и контракты самих операций ими не проверяются: там нужны
 транзакции и код. Владельцы этих тестов разные: транзакционная механика —
@@ -223,14 +233,17 @@ CREATE TABLE verification_status     (status    TEXT PRIMARY KEY);
 
 ### 1.5. Что означает «immutable» на практике
 
-SQLite не умеет запрещать UPDATE декларативно. Неизменяемость обеспечивается
-двумя средствами:
+SQLite не умеет запрещать UPDATE/DELETE декларативно. Неизменяемость
+обеспечивается двумя средствами:
 
-- **триггером** `BEFORE UPDATE ... RAISE(ABORT)` на таблицах, где неизменяемость
-  несущая (`review_observation`, `finding_observation_link`,
-  `finding_resolution`, `run_event`);
-- **отсутствием кода**, который бы такой UPDATE выполнял: слой доступа не
-  предоставляет метода обновления для этих таблиц.
+- парой триггеров `BEFORE UPDATE`/`BEFORE DELETE ... RAISE(ABORT)` на полностью
+  неизменяемых evidence-таблицах (`review_observation`,
+  `finding_observation_link`, `finding_resolution`, `run_event`);
+- lifecycle-триггерами на строках, у которых есть один разрешённый переход:
+  `step_attempt` рождается active и один раз терминализируется, `review_round`
+  рождается open и один раз закрывается;
+- **отсутствием кода**, который бы выполнял обходную мутацию: слой доступа даёт
+  только именованные CAS-операции завершения, но не generic update/delete.
 
 Триггер здесь не паранойя. Слепой вывод ревьюера — это доказательство при
 разборе «ревьюер объявил новым то, что было открыто» (`decision.md` §6.3), и
@@ -450,7 +463,103 @@ CREATE UNIQUE INDEX ux_attempt_id_lane     ON step_attempt (id, lane_id);
 CREATE UNIQUE INDEX ux_attempt_active
   ON step_attempt (stage_id, role, COALESCE(lane_id, -1))
   WHERE outcome IS NULL;
+
+-- Попытка — durable intent до spawn, поэтому INSERT всегда создаёт active
+-- строку. Терминальные поля нельзя проставить заранее и тем самым обойти
+-- recovery окна intent -> effect -> reconcile.
+CREATE TRIGGER trg_attempt_initial_state
+BEFORE INSERT ON step_attempt
+WHEN NEW.outcome           IS NOT NULL
+  OR NEW.outcome_detail    IS NOT NULL
+  OR NEW.actual_model      IS NOT NULL
+  OR NEW.output_sha        IS NOT NULL
+  OR NEW.finished_at       IS NOT NULL
+  OR NEW.transcript_path   IS NOT NULL
+  OR NEW.transcript_digest IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'step_attempt must start active');
+END;
+
+-- Единственный UPDATE строки попытки — active -> terminal. Все identity,
+-- scope и input-поля остаются прежними; finished_at обязателен. Heartbeat и
+-- process status живут в attempt_liveness и этого UPDATE не требуют.
+CREATE TRIGGER trg_attempt_finish_once
+BEFORE UPDATE ON step_attempt
+WHEN NEW.id                 IS NOT OLD.id
+  OR NEW.public_id          IS NOT OLD.public_id
+  OR NEW.run_id             IS NOT OLD.run_id
+  OR NEW.stage_id           IS NOT OLD.stage_id
+  OR NEW.role               IS NOT OLD.role
+  OR NEW.campaign_id        IS NOT OLD.campaign_id
+  OR NEW.round_id           IS NOT OLD.round_id
+  OR NEW.lane_id            IS NOT OLD.lane_id
+  OR NEW.lane_assignment_id IS NOT OLD.lane_assignment_id
+  OR NEW.subject_revision   IS NOT OLD.subject_revision
+  OR NEW.session_id         IS NOT OLD.session_id
+  OR NEW.profile_id         IS NOT OLD.profile_id
+  OR NEW.requested_model    IS NOT OLD.requested_model
+  OR NEW.prompt_template_id IS NOT OLD.prompt_template_id
+  OR NEW.prompt_hash        IS NOT OLD.prompt_hash
+  OR NEW.rubric_id          IS NOT OLD.rubric_id
+  OR NEW.rubric_hash        IS NOT OLD.rubric_hash
+  OR NEW.input_sha          IS NOT OLD.input_sha
+  OR NEW.input_refs_json    IS NOT OLD.input_refs_json
+  OR NEW.manifest_json      IS NOT OLD.manifest_json
+  OR NEW.started_at         IS NOT OLD.started_at
+  OR OLD.outcome            IS NOT NULL
+  OR NEW.outcome            IS NULL
+  OR NEW.finished_at        IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'step_attempt allows one active-to-terminal update');
+END;
+
+CREATE TRIGGER trg_attempt_no_delete
+BEFORE DELETE ON step_attempt
+BEGIN
+  SELECT RAISE(ABORT, 'step_attempt cannot be deleted');
+END;
 ```
+
+#### C-07/C-08: lifecycle до DDL
+
+Инвариант сильнее исходных контрпримеров: **попытка хранит неизменяемый intent
+и ровно один терминальный результат; evidence-строки не исчезают; круг хранит
+неизменяемый input и ровно одно закрытие.**
+
+| Поле чек-листа | Решение |
+|---|---|
+| Запрещённые состояния | Терминальный `INSERT` attempt/round; правка input/scope; result до terminal-перехода; повторное завершение; terminal → active; DELETE evidence/attempt/round |
+| Источник истины | `step_attempt` для input/result вызова; `review_round` для результата круга; три evidence-таблицы для audit trail |
+| Создающая операция и владелец | attempt создаёт runtime T1.18 до spawn; round создаёт review workflow T1.7b; repository-примитивы и CAS принадлежат T1.3 |
+| Транзакционная граница | Завершение attempt пишется вместе с его domain-result; закрытие round — с campaign state и событием; триггер не заменяет эту атомарность |
+| Формы | attempt: active — все terminal-поля NULL; terminal — `outcome` и `finished_at` заданы. round: open — `result/closed_at` NULL; closed — оба заданы |
+| Scope | Все identity/scope/input-координаты обеих строк после INSERT неизменяемы; существующие составные FK проверяют их согласованность |
+| Разрешённые UPDATE/DELETE | По одному CAS `NULL → terminal`; DELETE нет. Liveness меняет только отдельную `attempt_liveness` |
+| Retry/crash | CAS различает missing и already-terminal; после неясного commit повтор не переписывает факт, recovery читает сохранённый terminal result |
+| База / операция / recovery | Триггеры держат форму и lifecycle; repository держит CAS и типизированные ошибки; workflow — атомарность с соседними строками/событием; recovery только диагностирует незавершённое |
+| Негативные контрпримеры | `scripts/checks/attempt-lifecycle.sql`: terminal INSERT, каждая группа input/scope, преждевременный result, повтор/откат terminal, DELETE всех пяти durable-классов |
+| Синхронизация | T1.2 inventory `65/33/7/37`; T1.3 API, INV/FAIL/AC/V; граф задач T1.3; статус C-07/C-08 в своде |
+
+`AttemptRepository.complete_attempt()` выполняет один CAS:
+
+```sql
+UPDATE step_attempt
+SET outcome = :outcome,
+    outcome_detail = :outcome_detail,
+    actual_model = :actual_model,
+    output_sha = :output_sha,
+    finished_at = :finished_at,
+    transcript_path = :transcript_path,
+    transcript_digest = :transcript_digest
+WHERE id = :attempt_id AND outcome IS NULL;
+```
+
+`rowcount = 1` — завершение состоялось. При `rowcount = 0` repository читает
+строку по ID: отсутствующая даёт `RepositoryRecordNotFound`, существующая с
+непустым `outcome` — `RepositoryAlreadyTerminal(entity='step_attempt', ...)`.
+Одинаковый повтор не превращается в silent no-op: repository-примитив не знает,
+были ли вместе с первым завершением закоммичены обязательные domain-строки и
+событие, поэтому обязан показать повтор вызывающему workflow.
 
 Partial unique index — тот случай, где SQLite делает работу за нас: пока
 `outcome IS NULL`, вторая попытка той же роли в той же стадии физически не
@@ -1148,6 +1257,36 @@ CREATE TABLE review_round (
   CHECK ((result IS NULL) = (closed_at IS NULL))
 );
 
+CREATE TRIGGER trg_round_initial_state
+BEFORE INSERT ON review_round
+WHEN NEW.result IS NOT NULL OR NEW.closed_at IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'review_round must start open');
+END;
+
+-- Единственный UPDATE — open -> closed; identity и вход круга не меняются.
+CREATE TRIGGER trg_round_finish_once
+BEFORE UPDATE ON review_round
+WHEN NEW.id                    IS NOT OLD.id
+  OR NEW.campaign_id           IS NOT OLD.campaign_id
+  OR NEW.round_no              IS NOT OLD.round_no
+  OR NEW.kind                  IS NOT OLD.kind
+  OR NEW.preceding_revision_id IS NOT OLD.preceding_revision_id
+  OR NEW.opened_at             IS NOT OLD.opened_at
+  OR OLD.result                IS NOT NULL
+  OR OLD.closed_at             IS NOT NULL
+  OR NEW.result                IS NULL
+  OR NEW.closed_at             IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'review_round allows one open-to-closed update');
+END;
+
+CREATE TRIGGER trg_round_no_delete
+BEFORE DELETE ON review_round
+BEGIN
+  SELECT RAISE(ABORT, 'review_round cannot be deleted');
+END;
+
 -- Строка появляется ТОЛЬКО когда правка состоялась: попытка succeeded и дала
 -- новую ревизию. Это и есть счётчик — и он защищён внешними ключами, а не
 -- только дисциплиной вызывающего кода.
@@ -1195,9 +1334,9 @@ CREATE UNIQUE INDEX ux_attempt_id_outcome ON step_attempt (id, outcome);
 Стоимость — два индекса и две денормализованные колонки, которые не могут
 разойтись с источником, потому что связаны внешним ключом.
 
-Порядок внутри транзакции при этом обязателен: сначала `UPDATE step_attempt SET
-outcome = 'succeeded'`, потом `INSERT INTO author_revision`. Обратный порядок
-отвергнет FK — что и требуется.
+Порядок внутри транзакции при этом обязателен: сначала CAS
+`complete_attempt(..., outcome='succeeded')`, потом `INSERT INTO
+author_revision`. Обратный порядок отвергнет FK — что и требуется.
 
 **Строка `author_revision` — свершившийся факт, а не намерение.** Роль durable
 intent для checkpoint-коммита несёт сама запись `step_attempt`: она создаётся до
@@ -1330,15 +1469,11 @@ SELECT fs.finding_id
 audit; рассуждение «mapper должен был создать строку» не заменяет проверку
 полноты множества.
 
-Что база всё же гарантирует: `review_round.result` и `closed_at` выставляются
-только вместе (`CHECK`), так что «закрытый круг без результата» невозможен.
-
-Чего она пока не гарантирует: **однократности этой записи.** `UPDATE` уже
-закрытого круга — смена `result` или обнуление `closed_at` — база не отвергнет,
-хотя это результатная строка того же класса, что наблюдение и решение. Триггер
-сюда просится, но он принадлежит DDL-заходу по C-07/C-08, где такие запреты
-вносятся одним списком; здесь это названо явно, чтобы исключение не выглядело
-осознанным выбором.
+База гарантирует не только парность `review_round.result`/`closed_at`, но и весь
+lifecycle: круг вставляется открытым, input не меняется, пара закрытия
+выставляется одним UPDATE ровно один раз, DELETE запрещён. Repository закрывает
+круг CAS по `result IS NULL` и при нулевом `rowcount` различает
+`RepositoryRecordNotFound` и `RepositoryAlreadyTerminal`, как для attempt.
 
 ### 5.3. Наблюдение
 
@@ -1394,6 +1529,12 @@ CREATE TRIGGER trg_observation_immutable
 BEFORE UPDATE ON review_observation
 BEGIN
   SELECT RAISE(ABORT, 'review_observation is immutable');
+END;
+
+CREATE TRIGGER trg_observation_no_delete
+BEFORE DELETE ON review_observation
+BEGIN
+  SELECT RAISE(ABORT, 'review_observation cannot be deleted');
 END;
 ```
 
@@ -1780,6 +1921,13 @@ BEFORE UPDATE ON finding_observation_link
 BEGIN
   SELECT RAISE(ABORT, 'finding_observation_link is immutable');
 END;
+
+
+CREATE TRIGGER trg_link_no_delete
+BEFORE DELETE ON finding_observation_link
+BEGIN
+  SELECT RAISE(ABORT, 'finding_observation_link cannot be deleted');
+END;
 ```
 
 `observation_id` как первичный ключ даёт «одна связь на наблюдение» без единой
@@ -1989,6 +2137,13 @@ CREATE TRIGGER trg_resolution_immutable
 BEFORE UPDATE ON finding_resolution
 BEGIN
   SELECT RAISE(ABORT, 'finding_resolution is immutable');
+END;
+
+
+CREATE TRIGGER trg_resolution_no_delete
+BEFORE DELETE ON finding_resolution
+BEGIN
+  SELECT RAISE(ABORT, 'finding_resolution cannot be deleted');
 END;
 ```
 
@@ -3093,12 +3248,12 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 |---|---|
 | Задан branch-scoped вопрос человеку | `human_question` + все строки `human_question_observation` для `reconcile_failed`/`reopen_human_closed` + `notification_outbox` + `blocker(branch_id, question_id)` + `branch.state='blocked'` + `run_event`. Членство именно здесь, а не «позже допишем»: после `human_answer` триггер строку уже не примет, и вопрос без набора означал бы решение по показанному, чего никто не видел |
 | Получен ответ | `telegram_inbox.handled_at` + `human_answer` + `blocker(human_question).cleared_at` + новый `blocker(awaiting_continue, branch_id)` + сохранённый `branch.state='blocked'` + review-следствие (`stage_execution.max_author_revisions += 1` при дополнительной правке; `review_campaign.state='closed_escalated'` при окончательном ответе; `lane_assignment` нового поколения либо `lane_waiver` при ответе на `lane_failure`) + `run_event` |
-| Задача выполнена | `step_attempt.outcome` + `task.state='done'` + пересчёт готовности зависимых + `run_event` |
-| Круг ревью закрыт | Все `finding_round` круга + `review_round.result` + `finding_resolution` по закрытым + состояние кампании (`closed_clean` при успехе; прежний `fix_cycle` при `escalated` до ответа человека) + `run_event` |
+| Задача выполнена | CAS `complete_attempt()` + `task.state='done'` + пересчёт готовности зависимых + `run_event` |
+| Круг ревью закрыт | Все `finding_round` круга + CAS `close_round()` + `finding_resolution` по закрытым + состояние кампании (`closed_clean` при успехе; прежний `fix_cycle` при `escalated` до ответа человека) + `run_event` |
 | Кампания открыта | `review_subject` (или существующий) + `review_campaign(state='discovery')` со snapshot порога + слоты `review_lane` + первые `lane_assignment` + `review_round(1, discovery)` + `run_event` |
 | Слепая фаза завершена | `review_campaign.state='reconciliation'` + `run_event(discovery_completed)`; коммит **до** spawn reconciler, иначе после падения recovery всё ещё видит `discovery` |
 | Импорт графа | `task_graph_import` + `task` + `task_dependency` + инвалидация задач прежней ревизии + `run_event` |
-| Эскалация | `review_round.result='escalated'` + `human_question(snapshot_json)` + `notification_outbox` + `blocker(branch_id, question_id)` + `branch.state='blocked'` + сохранённый `review_campaign.state='fix_cycle'` + `run_event` |
+| Эскалация | CAS `close_round(result='escalated')` + `human_question(snapshot_json)` + `notification_outbox` + `blocker(branch_id, question_id)` + `branch.state='blocked'` + сохранённый `review_campaign.state='fix_cycle'` + `run_event` |
 
 Отдельная атомарная операция внутри открытого `fix_check` не добавляет нового
 перехода машины состояний, но тоже неделима: follow-up `review_observation`

@@ -296,7 +296,8 @@ flowchart TB
        нет → процесс мог стартовать до записи pid: искать по маркеру
   2. независимо от (1) — сканировать /proc/*/environ на
      METASWARM_ATTEMPT_ID; каждую найденную группу гасить
-  3. outcome = 'interrupted', событие
+  3. CAS complete_attempt(outcome='interrupted') + событие; missing — invariant
+     error, already-terminal — перечитать факт и не переписывать его
 ```
 
 Шаг 1 — тот, ради которого в `attempt_liveness` лежит `proc_start_ticks`: PID
@@ -668,7 +669,8 @@ answer относится к кампании целиком.
    ├─ до spawn: TX: сначала step_attempt, затем строка допуска
    │  reviewer_exposure по resolved provider/model — порядок задан FK
    │  first_attempt_id; при конфликте строка читается и сверяется
-   └─ по завершении каждой: TX: observations + attempt.outcome
+   └─ по завершении каждой: TX: observations
+          + complete_attempt(..., outcome='succeeded') CAS
 
    Одна линия упала, вторая закончила → частичный результат не
    засчитывается как консенсус: круг не закрывается, отработавшая
@@ -693,7 +695,7 @@ answer относится к кампании целиком.
           + finding_round(entry_kind=post_check) для targets,
             которых ещё нет в этом круге
           + четыре пустых completeness gates
-          + review_round.result + состояние campaign + событие
+          + close_round(...) CAS + состояние campaign + событие
 
 4. Цикл правок
    loop:
@@ -702,7 +704,8 @@ answer относится к кампании целиком.
      ├─ TX: author_revision + round(kind=fix_check, preceding_revision_id)
      │       + finding_round(entry_kind=issued, disposition,
      │                       author_attempt_id) для точного roster
-     │       + attempt.outcome (все или ни одного)
+     │       + complete_attempt(..., outcome='succeeded') CAS
+     │         (все или ни одного)
      ├─ владельцу каждого finding'а: проверить исправление или отказ;
      │  still_present/insists может содержать follow-up observation известного ID
      │  и отдельные new_observations
@@ -722,7 +725,7 @@ answer относится к кампании целиком.
      │          (участия всех линий здесь не требуется: в fix_check
      │           отвечают владельцы, а не весь кворум)
      ├─ собрать open set после всех решений и reconciliation
-     ├─ TX: review_round.result + событие
+     ├─ TX: close_round(...) CAS + событие
      └─ decide_after_check(...) → следующий круг | успех | человек
 
 5. Закрытие или human gate
@@ -849,7 +852,7 @@ kill -9 сервиса во время работы агента
   ├─ старт сервиса: flock свободен (ядро снял)
   ├─ recovery: attempt.outcome IS NULL, epoch чужая
   │   ├─ pid+proc_start_ticks совпали → группа жива → TERM → grace → KILL
-  │   └─ outcome = interrupted (бюджет не тратится)
+  │   └─ complete_attempt(outcome=interrupted) CAS (бюджет не тратится)
   ├─ ветка → blocked(awaiting_continue)
   └─ continue → drift check → повтор шага с чистого листа
 ```
