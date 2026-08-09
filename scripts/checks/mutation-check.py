@@ -26,10 +26,17 @@
 Перед мутациями каждый файл прогоняется как есть: красный baseline обесценивает
 любую мутацию. Строки, начинающиеся с `#`, игнорируются.
 
-Мутация записывается одним из трёх способов:
+Мутация записывается одной из следующих форм:
 
     <таблица>::<фрагмент>   вырезать строку с фрагментом внутри CREATE TABLE
     TRIGGER:<имя>           удалить блок CREATE TRIGGER целиком
+    TRIGGER-WHEN:<имя>::<условие>
+                            удалить один верхнеуровневый дизъюнкт WHEN;
+                            для помеченных @mutation-cover-when триггеров
+                            одной строки на весь trigger недостаточно
+    TRIGGER-UPDATE-OF:<имя>::<колонка>
+                            убрать колонку из списка UPDATE OF; для помеченных
+                            @mutation-cover-update-of проверяется каждая
     <фрагмент>              вырезать по всему файлу (осторожно: фрагмент
                             может встречаться в нескольких таблицах)
 
@@ -59,6 +66,85 @@ def strip_trigger(sql: str, name: str) -> str:
     if end < 0:
         return sql
     return sql[:start] + sql[end + len("END;"):]
+
+
+def trigger_when(sql: str, name: str):
+    """Вернуть span WHEN-body и простые верхнеуровневые OR-термы.
+
+    Гранулярная мутация намеренно поддерживает только форму, в которой каждый
+    верхнеуровневый дизъюнкт занимает одну строку (`WHEN ...`, затем `OR ...`).
+    Это делает манифест читаемым и не притворяется SQL-парсером. Помеченный
+    trigger с другой формой coverage объявит сломанным.
+    """
+    start = sql.find("CREATE TRIGGER " + name)
+    if start < 0:
+        return None
+    begin = re.search(r"(?m)^BEGIN\s*$", sql[start:])
+    if not begin:
+        return None
+    header_end = start + begin.start()
+    header = sql[start:header_end]
+    match = re.search(r"(?s)\bWHEN\s+(.+?)\s*\Z", header)
+    if not match:
+        return None
+    body_start = start + match.start(1)
+    body_end = start + match.end(1)
+    lines = [line.strip() for line in match.group(1).splitlines()
+             if line.strip()]
+    if not lines:
+        return None
+    terms = [lines[0]]
+    for line in lines[1:]:
+        if not line.startswith("OR "):
+            return None
+        terms.append(line[3:].strip())
+    return body_start, body_end, terms
+
+
+def strip_trigger_when_term(sql: str, name: str, needle: str) -> str:
+    parsed = trigger_when(sql, name)
+    if parsed is None:
+        return sql
+    start, end, terms = parsed
+    normalized = squash(needle)
+    indexes = [i for i, term in enumerate(terms) if squash(term) == normalized]
+    if len(indexes) != 1 or len(terms) == 1:
+        return sql
+    del terms[indexes[0]]
+    replacement = terms[0] + "\n" + "\n".join("  OR " + t for t in terms[1:])
+    return sql[:start] + replacement + sql[end:]
+
+
+def trigger_update_columns(sql: str, name: str):
+    start = sql.find("CREATE TRIGGER " + name)
+    if start < 0:
+        return None
+    begin = re.search(r"(?m)^BEGIN\s*$", sql[start:])
+    if not begin:
+        return None
+    header_end = start + begin.start()
+    header = sql[start:header_end]
+    match = re.search(r"(?is)\bBEFORE\s+UPDATE\s+OF\s+(.+?)\s+ON\s+\w+",
+                      header)
+    if not match:
+        return None
+    columns = [item.strip() for item in match.group(1).split(",")]
+    if not columns or any(not re.fullmatch(r"\w+", col) for col in columns):
+        return None
+    return start + match.start(1), start + match.end(1), columns
+
+
+def strip_trigger_update_column(sql: str, name: str, needle: str) -> str:
+    parsed = trigger_update_columns(sql, name)
+    if parsed is None:
+        return sql
+    start, end, columns = parsed
+    indexes = [i for i, col in enumerate(columns) if col == needle.strip()]
+    if len(indexes) != 1 or len(columns) == 1:
+        return sql
+    del columns[indexes[0]]
+    replacement = ", ".join(columns)
+    return sql[:start] + replacement + sql[end:]
 
 
 def table_block(sql: str, table: str):
@@ -129,6 +215,18 @@ def apply_mutation(source: str, mutation: str) -> str:
         for part in mutation.split(" && "):
             result = apply_mutation(result, part.strip())
         return result
+    if mutation.startswith("TRIGGER-UPDATE-OF:"):
+        spec = mutation[len("TRIGGER-UPDATE-OF:"):]
+        if "::" not in spec:
+            return source
+        name, column = spec.split("::", 1)
+        return strip_trigger_update_column(source, name, column)
+    if mutation.startswith("TRIGGER-WHEN:"):
+        spec = mutation[len("TRIGGER-WHEN:"):]
+        if "::" not in spec:
+            return source
+        name, fragment = spec.split("::", 1)
+        return strip_trigger_when_term(source, name, fragment)
     if mutation.startswith("TRIGGER:"):
         return strip_trigger(source, mutation[len("TRIGGER:"):])
     if "::" in mutation:
@@ -272,7 +370,15 @@ def constraints_of(sql: str, referenced):
 def addresses(mutation: str):
     for part in mutation.split(" && "):
         part = part.strip()
-        if part.startswith("TRIGGER:"):
+        if part.startswith("TRIGGER-UPDATE-OF:"):
+            spec = part[len("TRIGGER-UPDATE-OF:"):]
+            name = spec.split("::", 1)[0]
+            yield (None, "TRIGGER:" + name)
+        elif part.startswith("TRIGGER-WHEN:"):
+            spec = part[len("TRIGGER-WHEN:"):]
+            name = spec.split("::", 1)[0]
+            yield (None, "TRIGGER:" + name)
+        elif part.startswith("TRIGGER:"):
             yield (None, part)
         elif "::" in part:
             table, fragment = part.split("::", 1)
@@ -322,10 +428,74 @@ def run_coverage(path: str) -> int:
     addrs = [a for _f, mutation, _e, _s in rows for a in addresses(mutation)]
     missing = [c for c in where if not any(covers(a, c) for a in addrs)]
 
+    # Для явно помеченных многосоставных WHEN структурной строки TRIGGER:name
+    # недостаточно: она доказывает только, что хоть какая-то часть trigger
+    # нужна. Каждый верхнеуровневый OR обязан иметь собственную granular row.
+    expected_branches = []
+    broken_annotations = []
+    for sql_file, source in sources.items():
+        for name in re.findall(r"(?m)^-- @mutation-cover-when (\w+)\s*$",
+                               source):
+            parsed = trigger_when(source, name)
+            if parsed is None:
+                broken_annotations.append((sql_file, name))
+                continue
+            expected_branches.extend((sql_file, name, term)
+                                     for term in parsed[2])
+
+    covered_branches = set()
+    covered_update_columns = set()
+    for sql_file, mutation, _expected, _status in rows:
+        for part in mutation.split(" && "):
+            part = part.strip()
+            if part.startswith("TRIGGER-UPDATE-OF:") and "::" in part:
+                name, column = part[len("TRIGGER-UPDATE-OF:"):].split("::", 1)
+                covered_update_columns.add((sql_file, name, column.strip()))
+                continue
+            if not part.startswith("TRIGGER-WHEN:") or "::" not in part:
+                continue
+            name, term = part[len("TRIGGER-WHEN:"):].split("::", 1)
+            covered_branches.add((sql_file, name, squash(term)))
+    missing_branches = [
+        (sql_file, name, term)
+        for sql_file, name, term in expected_branches
+        if (sql_file, name, squash(term)) not in covered_branches
+    ]
+
+    expected_update_columns = []
+    broken_update_annotations = []
+    for sql_file, source in sources.items():
+        for name in re.findall(
+                r"(?m)^-- @mutation-cover-update-of (\w+)\s*$", source):
+            parsed = trigger_update_columns(source, name)
+            if parsed is None:
+                broken_update_annotations.append((sql_file, name))
+                continue
+            expected_update_columns.extend((sql_file, name, column)
+                                           for column in parsed[2])
+    missing_update_columns = [
+        (sql_file, name, column)
+        for sql_file, name, column in expected_update_columns
+        if (sql_file, name, column) not in covered_update_columns
+    ]
+
     for constraint in sorted(missing, key=lambda c: (where[c][0], c[0] or "", c[1])):
         table, text = constraint
         address = text if table is None else "%s::%s" % (table, text)
         print("%s%s%s%s<шаг>" % (where[constraint][0], chr(9), address, chr(9)))
+
+    for sql_file, name in broken_annotations:
+        print("BROKEN annotation %s: trigger %s не имеет простой WHEN/OR-формы"
+              % (sql_file, name))
+    for sql_file, name, term in missing_branches:
+        address = "TRIGGER-WHEN:%s::%s" % (name, squash(term))
+        print("%s%s%s%s<шаг>" % (sql_file, chr(9), address, chr(9)))
+    for sql_file, name in broken_update_annotations:
+        print("BROKEN annotation %s: trigger %s не имеет UPDATE OF-списка"
+              % (sql_file, name))
+    for sql_file, name, column in missing_update_columns:
+        address = "TRIGGER-UPDATE-OF:%s::%s" % (name, column)
+        print("%s%s%s%s<шаг>" % (sql_file, chr(9), address, chr(9)))
 
     if dead:
         print(chr(10) + "МЁРТВЫЕ КЛЮЧИ — не мутация, а правка схемы:")
@@ -334,7 +504,15 @@ def run_coverage(path: str) -> int:
 
     print(chr(10) + "ограничений %d / покрыто %d / без строки %d / мёртвых ключей %d"
           % (len(where), len(where) - len(missing), len(missing), len(dead)))
-    return 1 if missing or dead else 0
+    print("ветвей WHEN %d / покрыто %d / без строки %d / сломанных меток %d"
+          % (len(expected_branches), len(expected_branches) - len(missing_branches),
+             len(missing_branches), len(broken_annotations)))
+    print("колонок UPDATE OF %d / покрыто %d / без строки %d / сломанных меток %d"
+          % (len(expected_update_columns),
+             len(expected_update_columns) - len(missing_update_columns),
+             len(missing_update_columns), len(broken_update_annotations)))
+    return 1 if (missing or dead or missing_branches or broken_annotations
+                 or missing_update_columns or broken_update_annotations) else 0
 
 
 def run_manifest(path: str) -> int:

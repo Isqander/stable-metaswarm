@@ -240,7 +240,7 @@ Python-пакет в `src/metaswarm`, явный setuptools discovery, `pyprojec
 
 ### T1.2 · Store: соединение, транзакции, события · 2 д
 
-PRAGMA (все пять), выделенный поток-писатель с очередью, `transaction()` как
+PRAGMA (все шесть), выделенный поток-писатель с очередью, `transaction()` как
 единственный способ записи, `run_event` append-only, миграция 0001 со схемой
 целиком.
 
@@ -267,7 +267,10 @@ already-terminal.
 доказывает attempt/round: обе строки рождаются active/open,
 input не меняется, terminal result записывается один раз, возврат в active и
 DELETE запрещены; `review_observation`, `finding_observation_link` и
-`finding_resolution` не обновляются и не удаляются. Отдельная параметризованная
+`finding_resolution` не обновляются, не удаляются и не заменяются через
+`INSERT OR REPLACE`. Вопрос сохраняет показанные scope/reason/text/options/
+snapshot, принятый ответ append-only, а `finding_round` один раз получает
+reviewer decision без изменения input/author-части. Отдельная параметризованная
 проверка проходит по всем child-колонкам закрытых enum'ов и подтверждает, что
 неизвестное значение отвергается FK.
 

@@ -108,6 +108,11 @@ def main(path: str) -> int:
     con = sqlite3.connect(":memory:")
     con.executescript(head)
     con.execute("PRAGMA foreign_keys = ON")
+    # DELETE-триггеры при INSERT OR REPLACE в SQLite вызываются только при
+    # recursive_triggers=ON. Production открывает каждое соединение с тем же
+    # обязательным PRAGMA; без него сценарии immutable/no-delete доказывали бы
+    # только прямой DELETE и пропускали замену строки целиком.
+    con.execute("PRAGMA recursive_triggers = ON")
 
     step, stmt = Step(), ""
     passed = failed = 0

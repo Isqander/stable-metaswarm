@@ -1,7 +1,7 @@
 # Схема состояния: SQLite
 
 **Текущий инвентарь после C-07/C-08:** **65 таблиц, 33 явных индекса,
-7 представлений и 37 триггеров**. Числа получены механическим подсчётом
+7 представлений и 45 триггеров**. Числа получены механическим подсчётом
 нормативных `CREATE`-операторов; 27 закрытых справочников не изменились.
 Исторические числа `61/24/6/6` относятся к шестой редакции; после неё вошли
 модель effective roster (C-01b) — **+2 таблицы,
@@ -18,7 +18,10 @@ C-04: **+1 таблица** (`campaign_transition`), **+4 индекса**, **+8
 вопроса. Соответственно у C-01a/C-01c и C-04 остаётся
 `campaign_transition` и восемь триггеров: переходы, начальное состояние и
 снимок кампании, границы индекса линии, неизменяемость и запрет удаления у
-допуска и у резолюции профиля. Остальные schema-effects того же свода (триггеры
+допуска и у резолюции профиля.
+Один lifecycle-заход C-07/C-08 добавил **+9 триггеров** для attempt/round и
+трёх evidence-таблиц; adversarial-проход — ещё **+8** для вопроса, ответа и
+`finding_round`. Остальные schema-effects того же свода (ограничения
 `max_author_revisions >= 1` и `UNIQUE(finding_id, event_id)`) вносятся
 следом; они не добавляют именованных schema-объектов и текущий inventory не
 меняют. Связный прогон DDL всё равно повторяется после них, чтобы проверить не
@@ -39,14 +42,16 @@ cross-campaign ссылки, формы строки попытки по рол�
 показанных наблюдений. Доказательная сила проверена отдельно:
 `scripts/checks/mutations.tsv` держит для ограничения назначенный шаг, и
 `mutation-check.py` требует, чтобы после снятия ограничения покраснел именно он.
-Четвёртый прогон, `attempt-lifecycle.sql`, — 49 сценариев на C-07/C-08:
+Четвёртый прогон, `attempt-lifecycle.sql`, — 70 сценариев на C-07/C-08:
 active/open начальную форму, неизменяемость каждого input/scope-поля, единственный
 terminal-переход попытки и круга и запрет UPDATE/DELETE evidence-строк.
-Все четыре воспроизводятся одной командой и падают ненулевым кодом при любом
-расхождении ожиданий:
+Пятый, `audit-lifecycle.sql`, — 43 сценария на immutable content вопроса,
+append-only ответ, однократный reviewer decision и обходы через `INSERT OR
+REPLACE`. Все пять воспроизводятся одной командой и падают ненулевым кодом при
+любом расхождении ожиданий:
 `python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
 можно передать несколько).
-Доказаны 90 мутационных случаев из 91 (случай может снимать несколько
+Доказаны 160 мутационных случаев из 161 (случай может снимать несколько
 перекрывающихся ключей сразу), один — признанный долг; манифест умеет держать и признанный долг
 (`todo: <причина>`), который считается недоказанным и виден в итоге отдельным
 числом.
@@ -54,18 +59,24 @@ terminal-переход попытки и круга и запрет UPDATE/DELE
 **Покрытие манифеста неполное, и это счётная величина, а не оценка.** Режим
 `mutation-check.py --coverage scripts/checks/mutations.tsv` перечисляет
 ограничения сценарных файлов, у которых нет ни одной строки манифеста: на
-2026-08-09 таких **44 из 136**. Отдельным списком тот же режим печатает
+2026-08-09 таких **42 из 147**. Дополнительно granular coverage считает
+многосоставные trigger'ы: все **38/38** верхнеуровневых ветвей `WHEN ... OR` и
+все **24/24** колонки помеченных `UPDATE OF` имеют отдельную мутацию и
+назначенный шаг. Строка на trigger целиком больше не выдаётся за доказательство
+каждого его условия. Отдельным списком тот же режим печатает
 **мёртвые ключи** — `UNIQUE`, куда входит первичный ключ, и на который никто не
 ссылается: отвергнуть строку он не может (PK уже уникален), значит ему нужна не
 мутация, а удаление. Найдено и удалено два, сейчас счётчик 0. Разница между «нет строки вовсе» и «строка есть,
-но сценарий не изолирован» существенна, и механизмы у них разные: первое ловит
-`--coverage`, второе — статус `todo:`. Из счёта осознанно исключены два класса:
+но сценарий не изолирован», и «строка есть, но за ней многосоставное условие»
+существенна. Механизмы разные: первое ловит structural `--coverage`, второе —
+статус `todo:`, третье — метки `@mutation-cover-when`/
+`@mutation-cover-update-of` и granular rows. Из счёта осознанно исключены два класса:
 инлайновые одноколоночные `REFERENCES` в объявлении колонки (тривиальный случай,
 плюс FK на закрытые справочники доказывает отдельный манифест T1.3) и
 родительские `UNIQUE (id, <scope>)` составных ключей — их снятие не ослабляет
 проверку, а ломает схему, и «назначенный шаг» для них ничего не значит.
 
-Все четыре прогона доказывают **констрейнты и cardinality** — какие строки база
+Все пять прогонов доказывают **констрейнты и cardinality** — какие строки база
 принимает, а какие нет. Атомарность «переход + событие», поведение при падении
 между операциями и контракты самих операций ими не проверяются: там нужны
 транзакции и код. Владельцы этих тестов разные: транзакционная механика —
@@ -74,9 +85,11 @@ T1.2, repository-примитивы (`reserve_reviewer_exposure()`) — T1.3, п
 `create_attempt_and_reserve_exposure()` вместе с проверкой легальности
 ревизии — **T1.18 в пакете P1-D**.
 
-Дата: 2026-08-05. Статус: шестая редакция после ревью T1.7b. Связная DDL из
-документа исполнена целиком в SQLite in-memory: 61 таблица, 24 индекса,
-6 представлений и 6 триггеров; `PRAGMA foreign_key_check` чист. Отдельными
+**Историческая baseline-проверка шестой редакции (2026-08-05).** Тогдашняя
+связная DDL была исполнена целиком в SQLite in-memory: 61 таблица, 24 индекса,
+6 представлений и 6 триггеров; `PRAGMA foreign_key_check` был чист. Это не
+утверждение о текущей редакции: её inventory указан в шапке, а новый связный
+прогон выполняется после оставшихся C-21/C-23. Отдельными
 негативными вставками проверены enum-FK, policy verdict и производные состояния
 `idle`/`cancelling`; после четвёртой редакции повторный полный прогон сохранил
 inventory `61/24/6/6`, а CHECK-и приняли согласованные пары
@@ -101,7 +114,7 @@ DDL. Документ отвечает на вопрос, на который р
 | Порядок работ | `task-plans.md` |
 
 В конце — §14: список мест, где проектирование **уточнило или дополнило**
-решение. Читать обязательно: там двадцать семь уточнений с обоснованием,
+решение. Читать обязательно: там двадцать восемь уточнений с обоснованием,
 включая одну необязательную возможность.
 
 ---
@@ -116,6 +129,7 @@ PRAGMA foreign_keys = ON;       -- по умолчанию OFF, включает
 PRAGMA synchronous = FULL;      -- см. ниже
 PRAGMA busy_timeout = 5000;
 PRAGMA trusted_schema = OFF;
+PRAGMA recursive_triggers = ON; -- иначе INSERT OR REPLACE обходит DELETE-trigger
 ```
 
 `synchronous = FULL`, а не `NORMAL`, хотя WAL с `NORMAL` переживает падение
@@ -127,6 +141,13 @@ PRAGMA trusted_schema = OFF;
 `foreign_keys = ON` выставляется при открытии **каждого** соединения. Это не
 свойство файла базы, и забытый PRAGMA превращает половину инвариантов ниже в
 декорацию.
+
+`recursive_triggers = ON` — такое же обязательное свойство соединения. При
+значении по умолчанию `OFF` SQLite не вызывает DELETE-триггеры для неявного
+удаления, которое делает `INSERT OR REPLACE`: завершённую attempt можно заменить
+новой active-строкой, а evidence — другим payload. Все trigger'ы схемы только
+проверяют и вызывают `RAISE(ABORT)`, сами DML не выполняют, поэтому включение не
+создаёт рекурсивных цепочек.
 
 ### 1.2. Идентификаторы: внутренние и публичные
 
@@ -233,17 +254,29 @@ CREATE TABLE verification_status     (status    TEXT PRIMARY KEY);
 
 ### 1.5. Что означает «immutable» на практике
 
-SQLite не умеет запрещать UPDATE/DELETE декларативно. Неизменяемость
-обеспечивается двумя средствами:
+SQLite не умеет запрещать UPDATE/DELETE декларативно. Реестр здесь
+нормативный — добавление durable-таблицы требует явно поместить её в один из
+классов:
 
-- парой триггеров `BEFORE UPDATE`/`BEFORE DELETE ... RAISE(ABORT)` на полностью
-  неизменяемых evidence-таблицах (`review_observation`,
-  `finding_observation_link`, `finding_resolution`, `run_event`);
-- lifecycle-триггерами на строках, у которых есть один разрешённый переход:
-  `step_attempt` рождается active и один раз терминализируется, `review_round`
-  рождается open и один раз закрывается;
-- **отсутствием кода**, который бы выполнял обходную мутацию: слой доступа даёт
-  только именованные CAS-операции завершения, но не generic update/delete.
+- **полностью append-only:** `run_event`, `review_lane`, `lane_waiver`,
+  `review_observation`, `finding_observation_link`, `finding_resolution`,
+  `reviewer_exposure`, `run_profile_resolution`,
+  `human_question_observation`, `human_answer`; у каждой есть пара
+  `BEFORE UPDATE`/`BEFORE DELETE ... RAISE(ABORT)`;
+- **управляемый lifecycle:** `step_attempt` рождается active и один раз
+  терминализируется; `review_round` — open и один раз закрывается;
+  `finding_round` сохраняет input/author-часть и один раз получает reviewer
+  decision; у `human_question` неизменяемы scope/reason/presentation/snapshot,
+  но меняются `answered_at`/`reask_count`; `lane_assignment` допускает только
+  однократную привязку `session_id`;
+- **неизменяемый снимок при изменяемом состоянии:** у `review_campaign`
+  identity/config snapshot защищён отдельным trigger, а state/closing fields
+  меняются по state machine.
+
+Второй слой — **отсутствие обходного кода**: repository даёт только именованные
+CAS/lifecycle-операции, но не generic update/delete. `recursive_triggers=ON`
+обязателен: иначе любой `BEFORE DELETE` из реестра обходится `INSERT OR
+REPLACE`.
 
 Триггер здесь не паранойя. Слепой вывод ревьюера — это доказательство при
 разборе «ревьюер объявил новым то, что было открыто» (`decision.md` §6.3), и
@@ -467,6 +500,7 @@ CREATE UNIQUE INDEX ux_attempt_active
 -- Попытка — durable intent до spawn, поэтому INSERT всегда создаёт active
 -- строку. Терминальные поля нельзя проставить заранее и тем самым обойти
 -- recovery окна intent -> effect -> reconcile.
+-- @mutation-cover-when trg_attempt_initial_state
 CREATE TRIGGER trg_attempt_initial_state
 BEFORE INSERT ON step_attempt
 WHEN NEW.outcome           IS NOT NULL
@@ -483,6 +517,7 @@ END;
 -- Единственный UPDATE строки попытки — active -> terminal. Все identity,
 -- scope и input-поля остаются прежними; finished_at обязателен. Heartbeat и
 -- process status живут в attempt_liveness и этого UPDATE не требуют.
+-- @mutation-cover-when trg_attempt_finish_once
 CREATE TRIGGER trg_attempt_finish_once
 BEFORE UPDATE ON step_attempt
 WHEN NEW.id                 IS NOT OLD.id
@@ -538,7 +573,7 @@ END;
 | Retry/crash | CAS различает missing и already-terminal; после неясного commit повтор не переписывает факт, recovery читает сохранённый terminal result |
 | База / операция / recovery | Триггеры держат форму и lifecycle; repository держит CAS и типизированные ошибки; workflow — атомарность с соседними строками/событием; recovery только диагностирует незавершённое |
 | Негативные контрпримеры | `scripts/checks/attempt-lifecycle.sql`: terminal INSERT, каждая группа input/scope, преждевременный result, повтор/откат terminal, DELETE всех пяти durable-классов |
-| Синхронизация | T1.2 inventory `65/33/7/37`; T1.3 API, INV/FAIL/AC/V; граф задач T1.3; статус C-07/C-08 в своде |
+| Синхронизация | T1.2 inventory `65/33/7/45`; T1.3 API, INV/FAIL/AC/V; граф задач T1.3; статус C-07/C-08 в своде |
 
 `AttemptRepository.complete_attempt()` выполняет один CAS:
 
@@ -607,7 +642,7 @@ Reviewer-попытка без `lane_id` формально не принадл�
 -- Изменяемая часть попытки вынесена отдельно: heartbeat пишется каждые
 -- несколько секунд, и он не должен трогать запись результата.
 CREATE TABLE attempt_liveness (
-  attempt_id             INTEGER PRIMARY KEY REFERENCES step_attempt(id) ON DELETE CASCADE,
+  attempt_id             INTEGER PRIMARY KEY REFERENCES step_attempt(id),
   service_epoch_id       INTEGER NOT NULL REFERENCES service_epoch(id),
   pid                    INTEGER NOT NULL,
   pgid                   INTEGER NOT NULL,
@@ -1259,12 +1294,13 @@ CREATE TABLE review_round (
 
 CREATE TRIGGER trg_round_initial_state
 BEFORE INSERT ON review_round
-WHEN NEW.result IS NOT NULL OR NEW.closed_at IS NOT NULL
+WHEN NEW.result IS NOT NULL
 BEGIN
   SELECT RAISE(ABORT, 'review_round must start open');
 END;
 
 -- Единственный UPDATE — open -> closed; identity и вход круга не меняются.
+-- @mutation-cover-when trg_round_finish_once
 CREATE TRIGGER trg_round_finish_once
 BEFORE UPDATE ON review_round
 WHEN NEW.id                    IS NOT OLD.id
@@ -1274,9 +1310,6 @@ WHEN NEW.id                    IS NOT OLD.id
   OR NEW.preceding_revision_id IS NOT OLD.preceding_revision_id
   OR NEW.opened_at             IS NOT OLD.opened_at
   OR OLD.result                IS NOT NULL
-  OR OLD.closed_at             IS NOT NULL
-  OR NEW.result                IS NULL
-  OR NEW.closed_at             IS NULL
 BEGIN
   SELECT RAISE(ABORT, 'review_round allows one open-to-closed update');
 END;
@@ -2037,6 +2070,39 @@ CREATE TABLE finding_round (
 );
 
 CREATE INDEX ix_finding_round_finding ON finding_round (finding_id);
+
+-- Координаты круга и ответ автора задаются при INSERT и потом не меняются.
+-- @mutation-cover-update-of trg_finding_round_input_immutable
+CREATE TRIGGER trg_finding_round_input_immutable
+BEFORE UPDATE OF
+  id, campaign_id, run_id, finding_id, round_no, round_id, owner_lane_id,
+  entry_kind, disposition, disposition_reason, author_attempt_id
+ON finding_round
+BEGIN
+  SELECT RAISE(ABORT, 'finding_round input is immutable');
+END;
+
+-- Reviewer decision не существует при создании roster и записывается позже.
+CREATE TRIGGER trg_finding_round_initial_state
+BEFORE INSERT ON finding_round
+WHEN NEW.reviewer_decision IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'finding_round must start without reviewer decision');
+END;
+
+CREATE TRIGGER trg_finding_round_decision_once
+BEFORE UPDATE OF reviewer_decision, reviewer_attempt_id, decided_at
+ON finding_round
+WHEN OLD.reviewer_decision IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'finding_round reviewer decision is terminal');
+END;
+
+CREATE TRIGGER trg_finding_round_no_delete
+BEFORE DELETE ON finding_round
+BEGIN
+  SELECT RAISE(ABORT, 'finding_round cannot be deleted');
+END;
 ```
 
 **Про `disposition IS NOT NULL` внутри CHECK — это не избыточность, а починка
@@ -2904,6 +2970,24 @@ CREATE TABLE human_question (
          OR (campaign_id IS NOT NULL AND round_id IS NOT NULL))
 );
 
+-- Scope, причина и presentation/snapshot — то, что увидел человек. Меняются
+-- только lifecycle-поля answered_at/reask_count; переписать сам вопрос нельзя.
+-- @mutation-cover-update-of trg_question_content_immutable
+CREATE TRIGGER trg_question_content_immutable
+BEFORE UPDATE OF
+  id, public_id, run_id, branch_id, stage_id, campaign_id, round_id,
+  finding_id, reason, question_text, options_json, snapshot_json, asked_at
+ON human_question
+BEGIN
+  SELECT RAISE(ABORT, 'human_question content is immutable');
+END;
+
+CREATE TRIGGER trg_question_no_delete
+BEFORE DELETE ON human_question
+BEGIN
+  SELECT RAISE(ABORT, 'human_question cannot be deleted');
+END;
+
 -- Что именно человек видел, когда отвечал. Нормализованное членство вместо
 -- разбора snapshot_json: только по этим строкам его решение и применимо.
 CREATE TABLE human_question_observation (
@@ -2968,6 +3052,18 @@ CREATE TABLE human_answer (
   received_at   INTEGER NOT NULL,
   UNIQUE (question_id)                 -- инвариант 20: один принятый ответ
 );
+
+CREATE TRIGGER trg_answer_immutable
+BEFORE UPDATE ON human_answer
+BEGIN
+  SELECT RAISE(ABORT, 'human_answer is immutable');
+END;
+
+CREATE TRIGGER trg_answer_no_delete
+BEFORE DELETE ON human_answer
+BEGIN
+  SELECT RAISE(ABORT, 'human_answer cannot be deleted');
+END;
 ```
 
 `QuestionRepository` выделяет `human_question.id` и `public_id = Q-<id>` тем же
@@ -3191,10 +3287,10 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 14 | Переход и событие — одна транзакция | **Код** | Единственный writer, `store.transaction()` пишет событие вместе с переходом |
 | 15 | Все переходы §6.6 атомарны целиком | **Код** | Восемь именованных транзакционных операций (§11); branch-scoped вопрос включает blocker с обеими ссылками и `branch.state='blocked'`. Допустимость самих переходов кампании при этом держит **база**: справочник `campaign_transition` + триггер |
 | 16 | Ответ записан до снятия блокировки | **Код** | Ответ, clear `human_question` и новый `awaiting_continue` пишутся одной TX; ветка остаётся `blocked` |
-| 17 | После перезапуска нет двойного перехода и двойной работы | **Код** | Recovery audit: `outcome IS NULL` → `interrupted`; новая попытка после подтверждения смерти pgid |
+| 17 | После перезапуска нет двойного перехода и двойной работы | **База + код** | База: terminal attempt/round записываются однократно, active attempt ограничена partial UNIQUE; код: recovery подтверждает смерть pgid, CAS-терминализирует и только затем создаёт новую попытку |
 | 18 | Один экземпляр сервиса на каталог | **ОС** | `flock` на файле + lease с heartbeat |
 | 19 | Не более одной активной попытки на линию или шаг | **База** | Partial unique index `ux_attempt_active`; ключ — слот, поэтому заменённое и заменившее поколения не могут работать параллельно |
-| 20 | Один принятый ответ; `UNIQUE(transport, update_id)` | **База** | `UNIQUE(question_id)` в `human_answer`; PK в `telegram_inbox` |
+| 20 | Один принятый ответ; `UNIQUE(transport, update_id)` | **База** | `UNIQUE(question_id)` в append-only `human_answer`; PK в `telegram_inbox`; `recursive_triggers=ON` не даёт `INSERT OR REPLACE` удалить прежний ответ |
 | 21 | FK между кампанией, кругом, замечанием, наблюдением, попыткой; `UNIQUE(campaign_id, finding_id, round_no)` | **База** | Составные FK §5.3.1 — связь с чужой кампанией, прогоном или стадией не вставляется; `entry_kind` FK и UNIQUE прямо в DDL |
 | 22 | Состояние `Run` вычисляется; branch blocker согласован с физическим состоянием ветки | **База + код** | `run_state` — представление; атомарная запись пары и три recovery-запроса §6.2 |
 | 23 | Нет self-edge, дублей, циклов; смысловой ID уникален | **База + код** | CHECK и PK; `UNIQUE(import_id, semantic_task_id)` + партиальный индекс на активную версию; цикл — обход внутри той же транзакции |
@@ -3206,8 +3302,8 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 29 | Прореживание меняет только файл заметок | **Код** | Шаг с явным allowlist путей, проверка diff перед коммитом |
 | 30 | `review_campaign.closed_at` заполнен только у терминальной кампании и обязателен для неё | **База** | CHECK связывает три `closed_*` значения с `closed_at IS NOT NULL` в обе стороны |
 
-**Итог: 8 инвариантов из 30 держит база целиком, 9 — совместно с кодом, 1 —
-операционная система (`flock`), 1 — конфигурация, 11 — код.**
+**Итог: 8 инвариантов из 30 держит база целиком, 10 — совместно с кодом, 1 —
+операционная система (`flock`), 1 — конфигурация, 10 — код.**
 
 Первая редакция заявляла 12 / 5 / 12, и это было завышением дважды. Сначала —
 потому что три «гарантированных базой» констрейнта на деле не работали (CHECK с
@@ -3422,7 +3518,7 @@ INSERT INTO verification_status(status) VALUES ('green'),('red'),('error');
 
 ## 14. Уточнения к `decision.md`
 
-Проектирование и последующее ревью таск-планов дали двадцать семь уточнений:
+Проектирование и последующее ревью таск-планов дали двадцать восемь уточнений:
 двадцать шесть мест, где решение чего-то не учло, и одна возможность (пункт 5).
 Ни одно из принятых
 решений не отменяется — но без этих уточнений часть из них нереализуема.
@@ -3852,6 +3948,21 @@ envelope свели к presentation, в нём по инерции остали�
 несовпадение набора отвергается до записи. У двух причин Q49 фиксированного
 набора нет: там ответ классифицирует наблюдения, и `options_json = NULL`
 законен.
+
+**28. DELETE-trigger без `recursive_triggers` не защищает от REPLACE.** SQLite
+при `INSERT OR REPLACE` неявно удаляет конфликтующую строку, но DELETE-trigger
+на этом пути при значении PRAGMA по умолчанию не вызывается. Поэтому
+append-only таблица формально запрещала прямой DELETE и одновременно позволяла
+заменить весь audit-факт: terminal attempt снова становилась active, observation
+получала другой payload, а `UNIQUE(question_id)` у принятого ответа обходился
+удалением старой строки.
+
+`recursive_triggers=ON` стал шестым обязательным connection PRAGMA с readback в
+T1.2. Рядом закрыт соседний audit-шов: scope/reason/presentation/snapshot
+`human_question` неизменяемы, `human_answer` append-only, а `finding_round`
+сохраняет input/author-поля и получает reviewer decision ровно один раз. Это не
+новая бизнес-семантика, а доведение уже принятых правил «решение по тому, что
+показали» и «один принятый ответ» до физической гарантии.
 
 ### Что было неверно в первой редакции этого документа
 

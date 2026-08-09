@@ -6,18 +6,90 @@
 # Адресация по таблице обязательна там, где фрагмент встречается не один раз.
 
 # --- attempt-lifecycle: C-07/C-08 ---
-scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_attempt_initial_state	02
-scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_attempt_finish_once	03a
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.outcome IS NOT NULL	02a
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.outcome_detail IS NOT NULL	02b
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.actual_model IS NOT NULL	02c
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.output_sha IS NOT NULL	02d
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.finished_at IS NOT NULL	02e
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.transcript_path IS NOT NULL	02f
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.transcript_digest IS NOT NULL	02g
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.id IS NOT OLD.id	03a
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.public_id IS NOT OLD.public_id	03b
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.run_id IS NOT OLD.run_id	03c
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.stage_id IS NOT OLD.stage_id	03d
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.role IS NOT OLD.role	03e
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.campaign_id IS NOT OLD.campaign_id	03f
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.round_id IS NOT OLD.round_id	03g
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.lane_id IS NOT OLD.lane_id	03h
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.lane_assignment_id IS NOT OLD.lane_assignment_id	03i
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.subject_revision IS NOT OLD.subject_revision	03j
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.session_id IS NOT OLD.session_id	03k
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.profile_id IS NOT OLD.profile_id	03l
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.requested_model IS NOT OLD.requested_model	03m
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.prompt_template_id IS NOT OLD.prompt_template_id	03n
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.prompt_hash IS NOT OLD.prompt_hash	03o
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.rubric_id IS NOT OLD.rubric_id	03p
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.rubric_hash IS NOT OLD.rubric_hash	03q
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.input_sha IS NOT OLD.input_sha	03r
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.input_refs_json IS NOT OLD.input_refs_json	03s
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.manifest_json IS NOT OLD.manifest_json	03t
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.started_at IS NOT OLD.started_at	03u
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::OLD.outcome IS NOT NULL	07
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.outcome IS NULL	04b
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_finish_once::NEW.finished_at IS NULL	04a
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_attempt_no_delete	11
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_round_initial_state	21
-scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_round_finish_once	22
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_round_finish_once::NEW.id IS NOT OLD.id	22a
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_round_finish_once::NEW.campaign_id IS NOT OLD.campaign_id	22b
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_round_finish_once::NEW.round_no IS NOT OLD.round_no	22c
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_round_finish_once::NEW.kind IS NOT OLD.kind	22d
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_round_finish_once::NEW.preceding_revision_id IS NOT OLD.preceding_revision_id	22e
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_round_finish_once::NEW.opened_at IS NOT OLD.opened_at	22f
+scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_round_finish_once::OLD.result IS NOT NULL	25
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_round_no_delete	28
+scripts/checks/attempt-lifecycle.sql	review_round::CHECK ((result IS NULL) = (closed_at IS NULL))	21a
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_observation_immutable	30
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_observation_no_delete	31
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_link_immutable	32
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_link_no_delete	33
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_resolution_immutable	34
 scripts/checks/attempt-lifecycle.sql	TRIGGER:trg_resolution_no_delete	35
+
+# --- audit-lifecycle: показанный вопрос, принятый ответ, решение owner ---
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::id	02a
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::public_id	02b
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::run_id	02c
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::branch_id	02d
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::stage_id	02e
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::campaign_id	02f
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::round_id	02g
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::finding_id	02h
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::reason	02i
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::question_text	02j
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::options_json	02k
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::snapshot_json	02l
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_question_content_immutable::asked_at	02m
+scripts/checks/audit-lifecycle.sql	TRIGGER:trg_question_no_delete	04
+scripts/checks/audit-lifecycle.sql	human_answer::UNIQUE (question_id)	11
+scripts/checks/audit-lifecycle.sql	TRIGGER:trg_answer_immutable	12
+scripts/checks/audit-lifecycle.sql	TRIGGER:trg_answer_no_delete	13
+scripts/checks/audit-lifecycle.sql	finding_round::UNIQUE (campaign_id, finding_id, round_no)	20a
+scripts/checks/audit-lifecycle.sql	TRIGGER:trg_finding_round_initial_state	21
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::id	22a
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::campaign_id	22b
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::run_id	22c
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::finding_id	22d
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::round_no	22e
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::round_id	22f
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::owner_lane_id	22g
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::entry_kind	22h
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::disposition	22i
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::disposition_reason	22j
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::author_attempt_id	22k
+scripts/checks/audit-lifecycle.sql	finding_round::CHECK ((reviewer_decision IS NULL) = (reviewer_attempt_id IS NULL))	23a
+scripts/checks/audit-lifecycle.sql	finding_round::CHECK ((reviewer_decision IS NULL) = (decided_at IS NULL))	23
+scripts/checks/audit-lifecycle.sql	TRIGGER:trg_finding_round_decision_once	25
+scripts/checks/audit-lifecycle.sql	TRIGGER:trg_finding_round_no_delete	26
 
 # --- scope-keys: корень scope ---
 scripts/checks/scope-keys.sql	review_campaign::FOREIGN KEY (stage_id, run_id)	01
