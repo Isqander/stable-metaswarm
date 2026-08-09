@@ -5,6 +5,10 @@
 # Мутация: «<таблица>::<фрагмент>» | «TRIGGER:<имя>» | «<фрагмент>».
 # Адресация по таблице обязательна там, где фрагмент встречается не один раз.
 
+# --- schema-constraints: C-21/C-23 ---
+scripts/checks/schema-constraints.sql	stage_execution::CHECK (max_author_revisions >= 1)	03
+scripts/checks/schema-constraints.sql	severity_override::UNIQUE (finding_id, event_id)	11
+
 # --- attempt-lifecycle: C-07/C-08 ---
 scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.outcome IS NOT NULL	02a
 scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.outcome_detail IS NOT NULL	02b

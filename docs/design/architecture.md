@@ -495,6 +495,8 @@ owner не заменяются.
 def decide_after_check(facts: CheckFacts) -> Decision:
     # Решение одновременно задаёт переход и сохраняемый round_result.
     assert facts.campaign_state == FIX_CYCLE
+    if facts.max_author_revisions < 1:
+        raise CycleInvariantError("max_author_revisions must be >= 1")
 
     # 1. Открытых findings нет — успех при любых счётчиках.
     #    В том числе если это была четвёртая проверка.
@@ -535,6 +537,10 @@ def decide_after_revision(...) -> Decision:
   (`decide_after_revision` не смотрит на счётчики вовсе);
 - чистая четвёртая проверка **не** блокирует ветку (первая ветка
   `decide_after_check` стоит до всех счётчиков).
+
+Ноль не является отдельным режимом протокола: T1.17 отвергает такой конфиг,
+DDL — такой snapshot стадии, а T1.4 возвращает `CycleInvariantError` до выбора
+ветки решения. Минимальное законное значение — 1.
 
 `review_check_count <= max_author_revisions + 1` — assert в конце транзакции, а
 не второй гейт. Если он сработал, это дефект планировщика, а не ситуация,

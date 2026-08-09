@@ -29,14 +29,18 @@
 
 Использование:
     python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql [ещё.sql …]
+    python3 scripts/checks/run-sql-check.py --design-schema docs/design/db-schema.md
 
 Файлов можно передать несколько: каждый прогоняется в своей базе, код возврата
 ненулевой, если провалился хотя бы один.
 """
 
 import json
+import os
+import re
 import sqlite3
 import sys
+import tempfile
 
 
 class Step:
@@ -198,10 +202,157 @@ def main(path: str) -> int:
     return 1 if failed else 0
 
 
+def _sql_fences(markdown: str):
+    """Возвращает statements из fenced-блоков ```sql в порядке документа."""
+    inside = False
+    buffer = ""
+    for line in markdown.splitlines(True):
+        marker = line.strip()
+        if marker == "```sql":
+            inside = True
+            buffer = ""
+            continue
+        if inside and marker == "```":
+            if buffer.strip():
+                raise ValueError("оборванный SQL statement перед закрытием fence")
+            inside = False
+            continue
+        if not inside:
+            continue
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            yield buffer.strip()
+            buffer = ""
+    if inside or buffer.strip():
+        raise ValueError("незакрытый SQL fence или statement")
+
+
+def _statement_head(statement: str) -> str:
+    without_comments = re.sub(r"(?m)^\s*--.*(?:\n|$)", "", statement)
+    return without_comments.lstrip().upper()
+
+
+def run_design_schema(path: str) -> int:
+    """Исполняет связную нормативную DDL и seed'ы прямо из db-schema.md."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    with open(path, encoding="utf-8") as fh:
+        markdown = fh.read()
+
+    inventory_match = re.search(
+        r"\*\*(\d+) таблиц,\s*(\d+) явных индекса,\s*"
+        r"(\d+) представлений и (\d+) триггеров\*\*",
+        markdown,
+    )
+    if inventory_match is None:
+        print("FAIL  в шапке не найден нормативный inventory", file=sys.stderr)
+        return 2
+    expected = tuple(int(value) for value in inventory_match.groups())
+
+    try:
+        statements = list(_sql_fences(markdown))
+    except ValueError as exc:
+        print("FAIL  %s" % exc, file=sys.stderr)
+        return 2
+
+    schema_statements = []
+    for statement in statements:
+        head = _statement_head(statement)
+        if head.startswith("CREATE ") or head.startswith("INSERT INTO "):
+            schema_statements.append(statement)
+
+    fd, db_path = tempfile.mkstemp(prefix="metaswarm-schema-", suffix=".sqlite3")
+    os.close(fd)
+    con = None
+    try:
+        con = sqlite3.connect(db_path)
+        con.execute("PRAGMA journal_mode = WAL")
+        con.execute("PRAGMA foreign_keys = ON")
+        con.execute("PRAGMA synchronous = FULL")
+        con.execute("PRAGMA busy_timeout = 5000")
+        con.execute("PRAGMA trusted_schema = OFF")
+        con.execute("PRAGMA recursive_triggers = ON")
+        pragma_values = tuple(
+            con.execute("PRAGMA %s" % name).fetchone()[0]
+            for name in (
+                "journal_mode", "foreign_keys", "synchronous", "busy_timeout",
+                "trusted_schema", "recursive_triggers",
+            )
+        )
+        expected_pragmas = ("wal", 1, 2, 5000, 0, 1)
+        if pragma_values != expected_pragmas:
+            print("FAIL  PRAGMA: ждали %s, получили %s"
+                  % (expected_pragmas, pragma_values))
+            return 1
+        for statement in schema_statements:
+            con.execute(statement)
+        con.commit()
+
+        actual_by_type = dict(con.execute(
+            "SELECT type, COUNT(*) FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' GROUP BY type"
+        ))
+        actual = (
+            actual_by_type.get("table", 0),
+            actual_by_type.get("index", 0),
+            actual_by_type.get("view", 0),
+            actual_by_type.get("trigger", 0),
+        )
+        if actual != expected:
+            print("FAIL  inventory: ждали %s, получили %s" % (expected, actual))
+            return 1
+
+        fk_rows = con.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_rows:
+            print("FAIL  foreign_key_check: %s" % (fk_rows,))
+            return 1
+
+        views = [row[0] for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name"
+        )]
+        for view in views:
+            con.execute('SELECT * FROM "%s" LIMIT 0' % view.replace('"', '""'))
+
+        stage_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='stage_execution'"
+        ).fetchone()[0]
+        override_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='severity_override'"
+        ).fetchone()[0]
+        normalized_stage = " ".join(stage_sql.split())
+        normalized_override = " ".join(override_sql.split())
+        if "CHECK (max_author_revisions >= 1)" not in normalized_stage:
+            print("FAIL  C-21 CHECK отсутствует в исполненной связной DDL")
+            return 1
+        if "UNIQUE (finding_id, event_id)" not in normalized_override:
+            print("FAIL  C-23 UNIQUE отсутствует в исполненной связной DDL")
+            return 1
+
+        print("OK    связная DDL: %d/%d/%d/%d" % actual)
+        print("OK    %d views читаются; foreign_key_check пуст" % len(views))
+        print("OK    C-21 CHECK и C-23 UNIQUE присутствуют в sqlite_master")
+        print("OK    PRAGMA: %s" % (pragma_values,))
+        return 0
+    except Exception as exc:
+        print("FAIL  связная DDL: %s: %s" % (type(exc).__name__, exc))
+        return 1
+    finally:
+        if con is not None:
+            con.close()
+        for suffix in ("", "-wal", "-shm"):
+            candidate = db_path + suffix
+            if os.path.exists(candidate):
+                os.unlink(candidate)
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(2)
+    if len(sys.argv) == 3 and sys.argv[1] == "--design-schema":
+        sys.exit(run_design_schema(sys.argv[2]))
     codes = []
     for path in sys.argv[1:]:
         if len(sys.argv) > 2:
