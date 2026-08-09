@@ -44,7 +44,10 @@ cross-campaign ссылки, формы строки попытки по рол�
 **Покрытие манифеста неполное, и это счётная величина, а не оценка.** Режим
 `mutation-check.py --coverage scripts/checks/mutations.tsv` перечисляет
 ограничения сценарных файлов, у которых нет ни одной строки манифеста: на
-2026-08-09 таких **47 из 127**. Разница между «нет строки вовсе» и «строка есть,
+2026-08-09 таких **44 из 124**. Отдельным списком тот же режим печатает
+**мёртвые ключи** — `UNIQUE`, куда входит первичный ключ, и на который никто не
+ссылается: отвергнуть строку он не может (PK уже уникален), значит ему нужна не
+мутация, а удаление. Найдено и удалено два, сейчас счётчик 0. Разница между «нет строки вовсе» и «строка есть,
 но сценарий не изолирован» существенна, и механизмы у них разные: первое ловит
 `--coverage`, второе — статус `todo:`. Из счёта осознанно исключены два класса:
 инлайновые одноколоночные `REFERENCES` в объявлении колонки (тривиальный случай,
@@ -546,7 +549,6 @@ CREATE TABLE review_subject (
   revision          TEXT    NOT NULL,
   parent_subject_id INTEGER REFERENCES review_subject(id),
   created_at        INTEGER NOT NULL,
-  UNIQUE (id, revision),                 -- под scope-FK из reviewer_exposure
   UNIQUE (id, run_id),                   -- под scope-FK кампании и родителя
   -- Вложенность не выходит за прогон: иначе рекурсия §5.1 смешает findings
   -- разных запусков.
@@ -2732,7 +2734,6 @@ CREATE TABLE human_question (
   asked_at      INTEGER NOT NULL,
   answered_at   INTEGER,
   reask_count   INTEGER NOT NULL DEFAULT 0,
-  UNIQUE (id, campaign_id),                -- под scope-FK членства
   UNIQUE (id, round_id),
   UNIQUE (id, reason),
   FOREIGN KEY (campaign_id, round_id) REFERENCES review_round(campaign_id, id),

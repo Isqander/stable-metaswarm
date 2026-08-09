@@ -38,7 +38,6 @@ CREATE TABLE review_subject (
   run_id            INTEGER NOT NULL REFERENCES run(id),
   revision          TEXT    NOT NULL,
   parent_subject_id INTEGER REFERENCES review_subject(id),
-  UNIQUE (id, revision),
   UNIQUE (id, run_id),
   FOREIGN KEY (parent_subject_id, run_id) REFERENCES review_subject(id, run_id),
   CHECK (parent_subject_id IS NULL OR parent_subject_id <> id)
@@ -210,7 +209,6 @@ CREATE TABLE human_question (
   round_id    INTEGER REFERENCES review_round(id),
   finding_id  INTEGER REFERENCES finding(id),
   reason      TEXT    NOT NULL REFERENCES question_reason(reason),
-  UNIQUE (id, campaign_id),
   UNIQUE (id, round_id),
   UNIQUE (id, reason),
   FOREIGN KEY (campaign_id, round_id) REFERENCES review_round(campaign_id, id),

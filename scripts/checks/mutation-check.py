@@ -207,7 +207,15 @@ def strip_comments(text: str) -> str:
     return re.sub(r"--[^\n]*", "", text)
 
 
-def constraints_of(sql: str):
+def referenced_keys(sql: str):
+    """Все ключи, на которые в файле кто-то ссылается: (таблица, колонки)."""
+    out = set()
+    for m in re.finditer(r"REFERENCES (\w+)\s*\(([^)]*)\)", sql):
+        out.add((m.group(1), tuple(c.strip() for c in m.group(2).split(","))))
+    return out
+
+
+def constraints_of(sql: str, referenced):
     """Все ограничения уровня таблицы и триггеры файла.
 
     Инлайновые `REFERENCES`/`NOT NULL` в объявлении колонки сюда не входят
@@ -222,12 +230,12 @@ def constraints_of(sql: str):
     # mismatch» на каждую вставку через зависимый ключ, краснеет пол-файла, и
     # назначенный шаг доказывает не своё. Такие UNIQUE из отчёта исключаются —
     # их держит сам факт, что зависимый FK работает.
-    referenced = set()
-    for m in re.finditer(r"REFERENCES (\w+)\s*\(([^)]*)\)", sql):
-        cols = tuple(c.strip() for c in m.group(2).split(","))
-        referenced.add((m.group(1), cols))
-
-    found = []
+    #
+    # `referenced` приходит снаружи и собран по ВСЕМ сценарным файлам: стаб —
+    # это срез схемы под свой сюжет, и ключ, никому не нужный здесь, вполне
+    # может быть несущим в соседнем файле. Считать ссылки по одному файлу
+    # значит объявлять мёртвым живое.
+    found, dead = [], []
     for m in re.finditer(r"CREATE TABLE (\w+) \(", sql):
         table, start = m.group(1), m.end()
         depth, i = 1, start
@@ -237,18 +245,28 @@ def constraints_of(sql: str):
             elif sql[i] == ")":
                 depth -= 1
             i += 1
-        for item in split_top_level(sql[start:i - 1]):
+        body = split_top_level(sql[start:i - 1])
+        pk = next((re.match(r"(\w+)", c).group(1) for c in body
+                   if "PRIMARY KEY" in c and re.match(r"\w+\s+\w+", c)), None)
+        for item in body:
             if not re.match(r"(FOREIGN KEY|CHECK|UNIQUE)\b", item):
                 continue
             unique = re.match(r"UNIQUE\s*\(([^)]*)\)$", item)
             if unique:
                 cols = tuple(c.strip() for c in unique.group(1).split(","))
-                if (table, cols) in referenced:
+                # UNIQUE, куда входит первичный ключ, не может отвергнуть ни
+                # одной строки: PK уже уникален. Такой ключ существует ровно
+                # затем, чтобы на него ссылались, — и если никто не ссылается,
+                # он не «недоказан», он мёртв. Мутация тут не нужна, нужна
+                # правка схемы, поэтому такие ключи идут отдельным списком.
+                if pk and pk in cols:
+                    if (table, cols) not in referenced:
+                        dead.append((table, item))
                     continue
             found.append((table, item))
     for m in re.finditer(r"CREATE TRIGGER (\w+)", sql):
         found.append((None, "TRIGGER:" + m.group(1)))
-    return found
+    return found, dead
 
 
 def addresses(mutation: str):
@@ -288,11 +306,18 @@ def run_coverage(path: str) -> int:
     # же ключ живёт в двух-трёх сценарных файлах, но доказать его достаточно
     # один раз — в том, где он несущий. Поэтому и адреса берутся из всего
     # манифеста, а не только из строк своего файла.
-    where = {}
-    for sql_file in sorted({r[0] for r in rows}):
-        sql = io.open(sql_file, encoding="utf-8").read()
-        for constraint in constraints_of(sql):
+    files = sorted({r[0] for r in rows})
+    sources = {f: io.open(f, encoding="utf-8").read() for f in files}
+    referenced = set().union(*(referenced_keys(s) for s in sources.values()))
+
+    where, dead = {}, {}
+    for sql_file in files:
+        sql = sources[sql_file]
+        live, orphans = constraints_of(sql, referenced)
+        for constraint in live:
             where.setdefault(constraint, []).append(sql_file)
+        for constraint in orphans:
+            dead.setdefault(constraint, []).append(sql_file)
 
     addrs = [a for _f, mutation, _e, _s in rows for a in addresses(mutation)]
     missing = [c for c in where if not any(covers(a, c) for a in addrs)]
@@ -302,9 +327,14 @@ def run_coverage(path: str) -> int:
         address = text if table is None else "%s::%s" % (table, text)
         print("%s%s%s%s<шаг>" % (where[constraint][0], chr(9), address, chr(9)))
 
-    print(chr(10) + "ограничений %d / покрыто %d / без строки %d"
-          % (len(where), len(where) - len(missing), len(missing)))
-    return 1 if missing else 0
+    if dead:
+        print(chr(10) + "МЁРТВЫЕ КЛЮЧИ — не мутация, а правка схемы:")
+        for (table, text), files in sorted(dead.items()):
+            print("  %s.%s — %s" % (table, text, files[0]))
+
+    print(chr(10) + "ограничений %d / покрыто %d / без строки %d / мёртвых ключей %d"
+          % (len(where), len(where) - len(missing), len(missing), len(dead)))
+    return 1 if missing or dead else 0
 
 
 def run_manifest(path: str) -> int:

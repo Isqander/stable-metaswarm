@@ -24,8 +24,7 @@ CREATE TABLE campaign_state (state TEXT PRIMARY KEY);
 CREATE TABLE review_subject (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id   INTEGER NOT NULL REFERENCES run(id),
-  revision TEXT    NOT NULL,
-  UNIQUE (id, revision)
+  revision TEXT    NOT NULL
 );
 
 CREATE TABLE review_campaign (
