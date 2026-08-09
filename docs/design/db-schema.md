@@ -32,10 +32,10 @@ roster при этом уже
 завершилась», замену исполнителя, повтор замены после падения, запрет
 параллельной работы двух поколений слота, зачёт работы вытесненного поколения,
 cross-campaign ссылки, формы строки попытки по роли и попытку потратить один
-ответ человека дважды. Второй прогон, `campaign-open.sql`, — 45 сценариев по
+ответ человека дважды. Второй прогон, `campaign-open.sql`, — 54 сценария по
 открытию кампании, матрице переходов, неизменяемости снимка и допуску
 ревьюера, включая штатный `fix_check` по новой ревизии. Третий прогон,
-`scope-keys.sql`, — 76 сценариев на
+`scope-keys.sql`, — 79 сценариев на
 составные ключи scope из §5.3.1: чужой прогон, чужая кампания, самый тихий
 класс «своя кампания, но чужой круг, линия или попытка» и оба источника
 решения связи — агент и человек, включая привязку ответа к кругу и к набору
@@ -45,13 +45,13 @@ cross-campaign ссылки, формы строки попытки по рол�
 Четвёртый прогон, `attempt-lifecycle.sql`, — 70 сценариев на C-07/C-08:
 active/open начальную форму, неизменяемость каждого input/scope-поля, единственный
 terminal-переход попытки и круга и запрет UPDATE/DELETE evidence-строк.
-Пятый, `audit-lifecycle.sql`, — 43 сценария на immutable content вопроса,
+Пятый, `audit-lifecycle.sql`, — 50 сценариев на immutable content вопроса,
 append-only ответ, однократный reviewer decision и обходы через `INSERT OR
 REPLACE`. Все пять воспроизводятся одной командой и падают ненулевым кодом при
 любом расхождении ожиданий:
 `python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
 можно передать несколько).
-Доказаны 160 мутационных случаев из 161 (случай может снимать несколько
+Доказаны 180 мутационных случаев из 181 (случай может снимать несколько
 перекрывающихся ключей сразу), один — признанный долг; манифест умеет держать и признанный долг
 (`todo: <причина>`), который считается недоказанным и виден в итоге отдельным
 числом.
@@ -59,18 +59,23 @@ REPLACE`. Все пять воспроизводятся одной команд
 **Покрытие манифеста неполное, и это счётная величина, а не оценка.** Режим
 `mutation-check.py --coverage scripts/checks/mutations.tsv` перечисляет
 ограничения сценарных файлов, у которых нет ни одной строки манифеста: на
-2026-08-09 таких **42 из 147**. Дополнительно granular coverage считает
-многосоставные trigger'ы: все **38/38** верхнеуровневых ветвей `WHEN ... OR` и
-все **24/24** колонки помеченных `UPDATE OF` имеют отдельную мутацию и
+2026-08-09 таких **42 из 150**. Дополнительно granular coverage по умолчанию
+считает каждый многосоставный trigger: все **55/55** верхнеуровневых ветвей
+`WHEN ... OR` и все **27/27** колонок `UPDATE OF` имеют отдельную мутацию и
 назначенный шаг. Строка на trigger целиком больше не выдаётся за доказательство
-каждого его условия. Отдельным списком тот же режим печатает
+каждого его условия; исключение возможно только явной меткой с объяснением, и
+сейчас таких исключений нет. Отдельным списком тот же режим печатает
 **мёртвые ключи** — `UNIQUE`, куда входит первичный ключ, и на который никто не
 ссылается: отвергнуть строку он не может (PK уже уникален), значит ему нужна не
 мутация, а удаление. Найдено и удалено два, сейчас счётчик 0. Разница между «нет строки вовсе» и «строка есть,
 но сценарий не изолирован», и «строка есть, но за ней многосоставное условие»
 существенна. Механизмы разные: первое ловит structural `--coverage`, второе —
-статус `todo:`, третье — метки `@mutation-cover-when`/
-`@mutation-cover-update-of` и granular rows. Из счёта осознанно исключены два класса:
+статус `todo:`, третье — обязательные granular rows. Ещё один режим,
+`mutation-check.py --schema-sync docs/design/db-schema.md scripts/checks`,
+сверяет все нормативные trigger'ы с исполняемыми стабами: сейчас **45/45**
+объектов присутствуют и совпадают дословно после снятия комментариев и
+пробелов. Поэтому отсутствующий во всех стабах объект тоже становится видимым.
+Из structural-счёта осознанно исключены два класса:
 инлайновые одноколоночные `REFERENCES` в объявлении колонки (тривиальный случай,
 плюс FK на закрытые справочники доказывает отдельный манифест T1.3) и
 родительские `UNIQUE (id, <scope>)` составных ключей — их снятие не ослабляет
@@ -500,7 +505,6 @@ CREATE UNIQUE INDEX ux_attempt_active
 -- Попытка — durable intent до spawn, поэтому INSERT всегда создаёт active
 -- строку. Терминальные поля нельзя проставить заранее и тем самым обойти
 -- recovery окна intent -> effect -> reconcile.
--- @mutation-cover-when trg_attempt_initial_state
 CREATE TRIGGER trg_attempt_initial_state
 BEFORE INSERT ON step_attempt
 WHEN NEW.outcome           IS NOT NULL
@@ -517,7 +521,6 @@ END;
 -- Единственный UPDATE строки попытки — active -> terminal. Все identity,
 -- scope и input-поля остаются прежними; finished_at обязателен. Heartbeat и
 -- process status живут в attempt_liveness и этого UPDATE не требуют.
--- @mutation-cover-when trg_attempt_finish_once
 CREATE TRIGGER trg_attempt_finish_once
 BEFORE UPDATE ON step_attempt
 WHEN NEW.id                 IS NOT OLD.id
@@ -1300,7 +1303,6 @@ BEGIN
 END;
 
 -- Единственный UPDATE — open -> closed; identity и вход круга не меняются.
--- @mutation-cover-when trg_round_finish_once
 CREATE TRIGGER trg_round_finish_once
 BEFORE UPDATE ON review_round
 WHEN NEW.id                    IS NOT OLD.id
@@ -2072,7 +2074,6 @@ CREATE TABLE finding_round (
 CREATE INDEX ix_finding_round_finding ON finding_round (finding_id);
 
 -- Координаты круга и ответ автора задаются при INSERT и потом не меняются.
--- @mutation-cover-update-of trg_finding_round_input_immutable
 CREATE TRIGGER trg_finding_round_input_immutable
 BEFORE UPDATE OF
   id, campaign_id, run_id, finding_id, round_no, round_id, owner_lane_id,
@@ -2972,7 +2973,6 @@ CREATE TABLE human_question (
 
 -- Scope, причина и presentation/snapshot — то, что увидел человек. Меняются
 -- только lifecycle-поля answered_at/reask_count; переписать сам вопрос нельзя.
--- @mutation-cover-update-of trg_question_content_immutable
 CREATE TRIGGER trg_question_content_immutable
 BEFORE UPDATE OF
   id, public_id, run_id, branch_id, stage_id, campaign_id, round_id,
@@ -3963,6 +3963,12 @@ T1.2. Рядом закрыт соседний audit-шов: scope/reason/presen
 сохраняет input/author-поля и получает reviewer decision ровно один раз. Это не
 новая бизнес-семантика, а доведение уже принятых правил «решение по тому, что
 показали» и «один принятый ответ» до физической гарантии.
+
+Доказательство тоже не opt-in: `mutation-check.py --coverage` требует отдельный
+свидетель каждой ветви многосоставного `WHEN` и каждой колонки многоколоночного
+`UPDATE OF`, а `--schema-sync` сверяет полный набор и тела нормативных trigger'ов
+со стабами. Для каждой полностью append-only таблицы §1.5 обязательны оба пути —
+прямой DELETE и конфликтующий REPLACE.
 
 ### Что было неверно в первой редакции этого документа
 

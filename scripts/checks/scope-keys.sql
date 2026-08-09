@@ -132,6 +132,8 @@ CREATE TABLE review_observation (
   subject_id  INTEGER NOT NULL REFERENCES review_subject(id),
   revision    TEXT    NOT NULL,
   seq         INTEGER NOT NULL,
+  severity_effective TEXT,
+  unchanged_from_id INTEGER REFERENCES review_observation(id),
   UNIQUE (campaign_id, seq),
   UNIQUE (id, campaign_id),
   UNIQUE (id, revision),
@@ -144,6 +146,26 @@ CREATE TABLE review_observation (
   FOREIGN KEY (attempt_id, round_id)    REFERENCES step_attempt(id, round_id),
   FOREIGN KEY (attempt_id, lane_id)     REFERENCES step_attempt(id, lane_id)
 );
+
+CREATE TRIGGER trg_observation_unchanged_from
+BEFORE INSERT ON review_observation
+WHEN NEW.unchanged_from_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'unchanged_from must point backwards within same campaign')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM review_observation p
+     WHERE p.id = NEW.unchanged_from_id
+       AND p.campaign_id = NEW.campaign_id
+       AND p.seq < NEW.seq
+  );
+  -- Наследование обязано быть настоящим: эффективная severity равна
+  -- родительской, иначе "подтвердил прежнюю" молча меняет оценку.
+  SELECT RAISE(ABORT, 'severity_effective must equal parent severity_effective')
+  WHERE NEW.severity_effective <> (
+    SELECT p.severity_effective FROM review_observation p
+     WHERE p.id = NEW.unchanged_from_id
+  );
+END;
 
 CREATE TABLE finding (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -403,6 +425,22 @@ VALUES (5, 2, 1, 'reviewer', 1, 1, 1, 'sha-1', NULL);
 -- @expect ok
 INSERT INTO review_observation(id, campaign_id, round_id, lane_id, attempt_id, subject_id, revision, seq)
 VALUES (1, 1, 1, 1, 1, 1, 'sha-1', 1);
+
+UPDATE review_observation SET severity_effective = 'low' WHERE id = 1;
+
+-- @step 07a unchanged_from обязан указывать назад
+-- @expect error point backwards
+INSERT INTO review_observation(
+  id, campaign_id, round_id, lane_id, attempt_id, subject_id, revision, seq,
+  severity_effective, unchanged_from_id
+) VALUES (90, 1, 1, 1, 1, 1, 'sha-1', 0, 'low', 1);
+
+-- @step 07b unchanged_from наследует effective severity без подмены
+-- @expect error must equal parent
+INSERT INTO review_observation(
+  id, campaign_id, round_id, lane_id, attempt_id, subject_id, revision, seq,
+  severity_effective, unchanged_from_id
+) VALUES (90, 1, 1, 1, 1, 1, 'sha-1', 90, 'high', 1);
 
 -- @step 08 наблюдение: круг кампании 1, слот кампании 2
 -- @expect error FOREIGN KEY
@@ -689,6 +727,12 @@ VALUES (1, 13, 2, 1, 2, 'reconcile_failed', NULL);
 -- @expect error FOREIGN KEY
 INSERT INTO human_question_observation(question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id)
 VALUES (1, 9, 1, 1, 1, 'reconcile_failed', NULL);
+
+-- @step 35y0 REPLACE не переписывает, что именно показали человеку
+-- @expect error never deleted
+INSERT OR REPLACE INTO human_question_observation(
+  question_id, observation_id, campaign_id, round_id, run_id, reason, finding_id
+) VALUES (1, 11, 1, 1, 1, 'reconcile_failed', NULL);
 
 -- @step 35y повтор строки членства при retry операции
 -- @expect error UNIQUE

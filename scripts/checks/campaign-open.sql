@@ -230,11 +230,13 @@ INSERT INTO campaign_transition(from_state, to_state) VALUES
   ('fix_cycle',      'closed_escalated'),
   ('fix_cycle',      'closed_cancelled');
 INSERT INTO run DEFAULT VALUES;
+INSERT INTO run DEFAULT VALUES; -- валидная соседняя scope-координата для mutation-тестов
 INSERT INTO run_event DEFAULT VALUES;
 INSERT INTO review_subject(id, run_id, revision) VALUES (1, 1, 'sha-1'), (2, 1, 'sha-2');
 INSERT INTO run_profile_resolution(run_id, profile_id, provider, model, resolved_at) VALUES
   (1, 'p-a', 'anthropic', 'opus', 10),
-  (1, 'p-b', 'openai',    'gpt',  10);
+  (1, 'p-b', 'openai',    'gpt',  10),
+  (1, 'p-z', 'unused',    'spare', 10); -- без child-FK для REPLACE-сценария
 
 -- @step 01 кампания рождается в discovery
 -- @expect ok
@@ -366,6 +368,41 @@ UPDATE review_campaign SET expected_lane_count = 1 WHERE id = 2;
 -- @expect error identity and snapshot are immutable
 UPDATE review_campaign SET severity_threshold = 'low' WHERE id = 1;
 
+-- Каждый оставшийся дизъюнкт snapshot-trigger имеет свой валидный UPDATE:
+-- без нужной ветви ни FK, ни UNIQUE, ни state machine его не отвергают.
+INSERT INTO review_campaign(id, public_id, run_id, stage_id, subject_id, ordinal,
+                            severity_threshold, policy_version,
+                            expected_lane_count, state, opened_at)
+VALUES (90, 'C-90', 1, 90, 1, 1, 'high', 'v1', 1, 'discovery', 50);
+
+-- @step 11c run_id снимка неизменяем
+-- @expect error identity and snapshot are immutable
+UPDATE review_campaign SET run_id = 2 WHERE id = 90;
+
+-- @step 11d stage_id снимка неизменяем
+-- @expect error identity and snapshot are immutable
+UPDATE review_campaign SET stage_id = 91 WHERE id = 90;
+
+-- @step 11e subject_id снимка неизменяем
+-- @expect error identity and snapshot are immutable
+UPDATE review_campaign SET subject_id = 2 WHERE id = 90;
+
+-- @step 11f ordinal снимка неизменяем
+-- @expect error identity and snapshot are immutable
+UPDATE review_campaign SET ordinal = 2 WHERE id = 90;
+
+-- @step 11g policy_version снимка неизменяем
+-- @expect error identity and snapshot are immutable
+UPDATE review_campaign SET policy_version = 'v2' WHERE id = 90;
+
+-- @step 11h opened_at снимка неизменяем
+-- @expect error identity and snapshot are immutable
+UPDATE review_campaign SET opened_at = 51 WHERE id = 90;
+
+-- @step 11i public_id кампании неизменяем
+-- @expect error identity and snapshot are immutable
+UPDATE review_campaign SET public_id = 'C-90-other' WHERE id = 90;
+
 -- @step 12 прыжок discovery -> fix_cycle в обход reconciliation
 -- @expect error illegal campaign state transition
 UPDATE review_campaign SET state = 'fix_cycle' WHERE id = 1;
@@ -493,6 +530,13 @@ UPDATE reviewer_exposure SET model = 'sonnet' WHERE campaign_id = 2;
 -- @expect error never deleted
 DELETE FROM reviewer_exposure WHERE campaign_id = 2;
 
+-- @step 32bR REPLACE строки допуска не переписывает first_attempt/audit time
+-- @expect error never deleted
+INSERT OR REPLACE INTO reviewer_exposure(
+  run_id, subject_id, revision, provider, model, campaign_id,
+  first_attempt_id, profile_id, created_at
+) VALUES (1, 2, 'sha-2', 'anthropic', 'opus', 2, 1, 'p-a', 999);
+
 -- Штатный fix_check: та же линия проверяет уже другую ревизию предмета.
 INSERT INTO review_round(id, campaign_id, round_no, kind) VALUES (4, 2, 2, 'fix_check');
 INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,
@@ -523,9 +567,15 @@ UPDATE run_profile_resolution SET model = 'sonnet' WHERE profile_id = 'p-a';
 -- @expect error never deleted
 DELETE FROM run_profile_resolution WHERE profile_id = 'p-b';
 
+-- @step 32gR REPLACE не меняет фактическую пару неиспользуемого профиля
+-- @expect error never deleted
+INSERT OR REPLACE INTO run_profile_resolution(
+  run_id, profile_id, provider, model, resolved_at
+) VALUES (1, 'p-z', 'unused', 'changed', 99);
+
 -- Второй прогон и новая ревизия — чтобы проверить последний непокрытый ключ
--- допуска, не задев уникальность.
-INSERT INTO run DEFAULT VALUES;
+-- допуска, не задев уникальность. Сам run создан выше как валидная соседняя
+-- scope-координата snapshot-тестов.
 INSERT INTO run_profile_resolution(run_id, profile_id, provider, model, resolved_at)
 VALUES (2, 'p-a', 'anthropic', 'opus', 10);
 INSERT INTO step_attempt(id, run_id, stage_id, role, campaign_id, round_id, lane_id,

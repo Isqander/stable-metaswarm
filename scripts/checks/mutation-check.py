@@ -7,10 +7,11 @@
 заводится мутация и **назначенный шаг**; проверка проходит, только если после
 снятия ограничения этот шаг оказался среди упавших.
 
-Три режима:
+Четыре режима:
 
     python3 scripts/checks/mutation-check.py scripts/checks/mutations.tsv
     python3 scripts/checks/mutation-check.py --coverage scripts/checks/mutations.tsv
+    python3 scripts/checks/mutation-check.py --schema-sync docs/design/db-schema.md scripts/checks
     python3 scripts/checks/mutation-check.py <файл.sql> "<мутация>" [ещё…]
 
 `--coverage` отвечает на вопрос, который манифест сам о себе не задаёт: какие
@@ -32,11 +33,11 @@
     TRIGGER:<имя>           удалить блок CREATE TRIGGER целиком
     TRIGGER-WHEN:<имя>::<условие>
                             удалить один верхнеуровневый дизъюнкт WHEN;
-                            для помеченных @mutation-cover-when триггеров
-                            одной строки на весь trigger недостаточно
+                            для любого многосоставного trigger одной строки
+                            на весь trigger недостаточно
     TRIGGER-UPDATE-OF:<имя>::<колонка>
-                            убрать колонку из списка UPDATE OF; для помеченных
-                            @mutation-cover-update-of проверяется каждая
+                            убрать колонку из списка UPDATE OF; у любого
+                            многоколоночного trigger проверяется каждая
     <фрагмент>              вырезать по всему файлу (осторожно: фрагмент
                             может встречаться в нескольких таблицах)
 
@@ -68,22 +69,29 @@ def strip_trigger(sql: str, name: str) -> str:
     return sql[:start] + sql[end + len("END;"):]
 
 
-def trigger_when(sql: str, name: str):
-    """Вернуть span WHEN-body и простые верхнеуровневые OR-термы.
-
-    Гранулярная мутация намеренно поддерживает только форму, в которой каждый
-    верхнеуровневый дизъюнкт занимает одну строку (`WHEN ...`, затем `OR ...`).
-    Это делает манифест читаемым и не притворяется SQL-парсером. Помеченный
-    trigger с другой формой coverage объявит сломанным.
-    """
+def trigger_header(sql: str, name: str):
     start = sql.find("CREATE TRIGGER " + name)
     if start < 0:
         return None
     begin = re.search(r"(?m)^BEGIN\s*$", sql[start:])
     if not begin:
         return None
-    header_end = start + begin.start()
-    header = sql[start:header_end]
+    return start, sql[start:start + begin.start()]
+
+
+def trigger_when(sql: str, name: str):
+    """Вернуть span WHEN-body и простые верхнеуровневые OR-термы.
+
+    Гранулярная мутация намеренно поддерживает только форму, в которой каждый
+    верхнеуровневый дизъюнкт занимает одну строку (`WHEN ...`, затем `OR ...`).
+    Это делает манифест читаемым и не притворяется SQL-парсером. Trigger с
+    другой формой coverage объявит неразобранным, если нет явного исключения с
+    причиной.
+    """
+    parsed_header = trigger_header(sql, name)
+    if parsed_header is None:
+        return None
+    start, header = parsed_header
     match = re.search(r"(?s)\bWHEN\s+(.+?)\s*\Z", header)
     if not match:
         return None
@@ -116,14 +124,10 @@ def strip_trigger_when_term(sql: str, name: str, needle: str) -> str:
 
 
 def trigger_update_columns(sql: str, name: str):
-    start = sql.find("CREATE TRIGGER " + name)
-    if start < 0:
+    parsed_header = trigger_header(sql, name)
+    if parsed_header is None:
         return None
-    begin = re.search(r"(?m)^BEGIN\s*$", sql[start:])
-    if not begin:
-        return None
-    header_end = start + begin.start()
-    header = sql[start:header_end]
+    start, header = parsed_header
     match = re.search(r"(?is)\bBEFORE\s+UPDATE\s+OF\s+(.+?)\s+ON\s+\w+",
                       header)
     if not match:
@@ -399,6 +403,91 @@ def covers(address, constraint) -> bool:
     return a_text in c_text
 
 
+def granular_exemptions(source: str):
+    """Явные исключения из granular coverage: имя -> непустая причина."""
+    return {
+        match.group(1): match.group(2).strip()
+        for match in re.finditer(
+            r"(?m)^-- @mutation-granular-exempt (\w+):\s*(.+?)\s*$", source
+        )
+    }
+
+
+def trigger_blocks(source: str):
+    return [
+        (match.group(1), match.group(0))
+        for match in re.finditer(
+            r"(?ms)^CREATE TRIGGER\s+(\w+)\b.*?^END;\s*$", source
+        )
+    ]
+
+
+def normalized_trigger(block: str) -> str:
+    return squash(strip_comments(block))
+
+
+def run_schema_sync(design_path: str, scenario_dir: str) -> int:
+    """Сверить все нормативные trigger'ы design с исполняемыми стабами."""
+    design = io.open(design_path, encoding="utf-8").read()
+    normative_rows = trigger_blocks(design)
+    scenarios = sorted(Path(scenario_dir).glob("*.sql"))
+    scenario_rows = []
+    locations = {}
+    for path in scenarios:
+        source = io.open(path, encoding="utf-8").read()
+        for name, block in trigger_blocks(source):
+            scenario_rows.append((name, block))
+            locations.setdefault(name, []).append(str(path).replace("\\", "/"))
+
+    normative = {}
+    duplicate_normative = set()
+    for name, block in normative_rows:
+        if name in normative:
+            duplicate_normative.add(name)
+        normative[name] = normalized_trigger(block)
+
+    actual = {}
+    duplicate_scenarios = set()
+    for name, block in scenario_rows:
+        normalized = normalized_trigger(block)
+        if name in actual:
+            duplicate_scenarios.add(name)
+        actual[name] = normalized
+
+    missing = sorted(set(normative) - set(actual))
+    extra = sorted(set(actual) - set(normative))
+    different = sorted(
+        name for name in set(normative) & set(actual)
+        if normative[name] != actual[name]
+    )
+    matched = len(set(normative) & set(actual)) - len(different)
+
+    for name in missing:
+        print("MISSING  %s" % name)
+    for name in extra:
+        print("EXTRA    %s — %s" % (name, ", ".join(locations[name])))
+    for name in different:
+        print("DIFF     %s — %s" % (name, ", ".join(locations[name])))
+    for name in sorted(duplicate_normative):
+        print("DUPLICATE design %s" % name)
+    for name in sorted(duplicate_scenarios):
+        print("DUPLICATE scenario %s — %s"
+              % (name, ", ".join(locations[name])))
+
+    print(
+        chr(10)
+        + "нормативных %d / в сценариях %d / совпало %d / без сценария %d / "
+          "расходятся %d / лишних %d / дублей %d"
+        % (
+            len(normative), len(actual), matched, len(missing),
+            len(different), len(extra),
+            len(duplicate_normative) + len(duplicate_scenarios),
+        )
+    )
+    return 1 if (missing or extra or different or duplicate_normative
+                 or duplicate_scenarios) else 0
+
+
 def run_coverage(path: str) -> int:
     """Какие ограничения sql-файлов не имеют ни одной строки манифеста.
 
@@ -428,20 +517,39 @@ def run_coverage(path: str) -> int:
     addrs = [a for _f, mutation, _e, _s in rows for a in addresses(mutation)]
     missing = [c for c in where if not any(covers(a, c) for a in addrs)]
 
-    # Для явно помеченных многосоставных WHEN структурной строки TRIGGER:name
+    # Для любого многосоставного WHEN структурной строки TRIGGER:name
     # недостаточно: она доказывает только, что хоть какая-то часть trigger
-    # нужна. Каждый верхнеуровневый OR обязан иметь собственную granular row.
+    # нужна. Opt-in оставил бы вне счёта именно забытые trigger'ы, поэтому
+    # granular coverage — default; исключение требует метки с причиной.
     expected_branches = []
     broken_annotations = []
+    exemption_rows = []
+    exemption_defs = {
+        (sql_file, name): reason
+        for sql_file, source in sources.items()
+        for name, reason in granular_exemptions(source).items()
+    }
     for sql_file, source in sources.items():
-        for name in re.findall(r"(?m)^-- @mutation-cover-when (\w+)\s*$",
-                               source):
-            parsed = trigger_when(source, name)
-            if parsed is None:
-                broken_annotations.append((sql_file, name))
+        exemptions = granular_exemptions(source)
+        names = re.findall(r"(?m)^CREATE TRIGGER\s+(\w+)\b", source)
+        for name in names:
+            header = trigger_header(source, name)
+            if header is None:
+                broken_annotations.append((sql_file, name, "нет header/BEGIN"))
                 continue
-            expected_branches.extend((sql_file, name, term)
-                                     for term in parsed[2])
+            parsed = trigger_when(source, name)
+            has_when = re.search(r"\bWHEN\b", header[1]) is not None
+            if has_when and parsed is None and name not in exemptions:
+                broken_annotations.append(
+                    (sql_file, name, "WHEN не разбирается на строковые OR-термы")
+                )
+                continue
+            if parsed is not None and len(parsed[2]) > 1:
+                if name in exemptions:
+                    exemption_rows.append((sql_file, name, exemptions[name]))
+                else:
+                    expected_branches.extend((sql_file, name, term)
+                                             for term in parsed[2])
 
     covered_branches = set()
     covered_update_columns = set()
@@ -465,18 +573,39 @@ def run_coverage(path: str) -> int:
     expected_update_columns = []
     broken_update_annotations = []
     for sql_file, source in sources.items():
-        for name in re.findall(
-                r"(?m)^-- @mutation-cover-update-of (\w+)\s*$", source):
-            parsed = trigger_update_columns(source, name)
-            if parsed is None:
-                broken_update_annotations.append((sql_file, name))
+        exemptions = granular_exemptions(source)
+        names = re.findall(r"(?m)^CREATE TRIGGER\s+(\w+)\b", source)
+        for name in names:
+            header = trigger_header(source, name)
+            if header is None:
                 continue
-            expected_update_columns.extend((sql_file, name, column)
-                                           for column in parsed[2])
+            has_update_of = re.search(
+                r"(?is)\bBEFORE\s+UPDATE\s+OF\b", header[1]
+            ) is not None
+            parsed = trigger_update_columns(source, name)
+            if has_update_of and parsed is None and name not in exemptions:
+                broken_update_annotations.append(
+                    (sql_file, name, "UPDATE OF не разбирается")
+                )
+                continue
+            if parsed is not None and len(parsed[2]) > 1:
+                if name in exemptions:
+                    row = (sql_file, name, exemptions[name])
+                    if row not in exemption_rows:
+                        exemption_rows.append(row)
+                else:
+                    expected_update_columns.extend((sql_file, name, column)
+                                                   for column in parsed[2])
     missing_update_columns = [
         (sql_file, name, column)
         for sql_file, name, column in expected_update_columns
         if (sql_file, name, column) not in covered_update_columns
+    ]
+    used_exemptions = {(sql_file, name) for sql_file, name, _ in exemption_rows}
+    invalid_exemptions = [
+        (sql_file, name, reason)
+        for (sql_file, name), reason in exemption_defs.items()
+        if (sql_file, name) not in used_exemptions
     ]
 
     for constraint in sorted(missing, key=lambda c: (where[c][0], c[0] or "", c[1])):
@@ -484,18 +613,22 @@ def run_coverage(path: str) -> int:
         address = text if table is None else "%s::%s" % (table, text)
         print("%s%s%s%s<шаг>" % (where[constraint][0], chr(9), address, chr(9)))
 
-    for sql_file, name in broken_annotations:
-        print("BROKEN annotation %s: trigger %s не имеет простой WHEN/OR-формы"
-              % (sql_file, name))
+    for sql_file, name, reason in broken_annotations:
+        print("BROKEN granular %s: trigger %s — %s"
+              % (sql_file, name, reason))
     for sql_file, name, term in missing_branches:
         address = "TRIGGER-WHEN:%s::%s" % (name, squash(term))
         print("%s%s%s%s<шаг>" % (sql_file, chr(9), address, chr(9)))
-    for sql_file, name in broken_update_annotations:
-        print("BROKEN annotation %s: trigger %s не имеет UPDATE OF-списка"
-              % (sql_file, name))
+    for sql_file, name, reason in broken_update_annotations:
+        print("BROKEN granular %s: trigger %s — %s"
+              % (sql_file, name, reason))
     for sql_file, name, column in missing_update_columns:
         address = "TRIGGER-UPDATE-OF:%s::%s" % (name, column)
         print("%s%s%s%s<шаг>" % (sql_file, chr(9), address, chr(9)))
+    for sql_file, name, reason in invalid_exemptions:
+        print("BROKEN granular-exempt %s: trigger %s — исключение не относится "
+              "к многосоставному WHEN/UPDATE OF (%s)"
+              % (sql_file, name, reason))
 
     if dead:
         print(chr(10) + "МЁРТВЫЕ КЛЮЧИ — не мутация, а правка схемы:")
@@ -504,15 +637,17 @@ def run_coverage(path: str) -> int:
 
     print(chr(10) + "ограничений %d / покрыто %d / без строки %d / мёртвых ключей %d"
           % (len(where), len(where) - len(missing), len(missing), len(dead)))
-    print("ветвей WHEN %d / покрыто %d / без строки %d / сломанных меток %d"
+    print("ветвей WHEN %d / покрыто %d / без строки %d / неразобранных %d"
           % (len(expected_branches), len(expected_branches) - len(missing_branches),
              len(missing_branches), len(broken_annotations)))
-    print("колонок UPDATE OF %d / покрыто %d / без строки %d / сломанных меток %d"
+    print("колонок UPDATE OF %d / покрыто %d / без строки %d / неразобранных %d"
           % (len(expected_update_columns),
              len(expected_update_columns) - len(missing_update_columns),
              len(missing_update_columns), len(broken_update_annotations)))
+    print("явных granular-исключений %d" % len(exemption_rows))
     return 1 if (missing or dead or missing_branches or broken_annotations
-                 or missing_update_columns or broken_update_annotations) else 0
+                 or missing_update_columns or broken_update_annotations
+                 or invalid_exemptions) else 0
 
 
 def run_manifest(path: str) -> int:
@@ -559,6 +694,8 @@ def main(argv) -> int:
 
     if len(argv) == 3 and argv[1] == "--coverage":
         return run_coverage(argv[2])
+    if len(argv) == 4 and argv[1] == "--schema-sync":
+        return run_schema_sync(argv[2], argv[3])
     if len(argv) == 2 and argv[1].endswith(".tsv"):
         return run_manifest(argv[1])
     if len(argv) < 3:

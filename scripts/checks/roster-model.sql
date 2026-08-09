@@ -221,6 +221,7 @@ INSERT INTO attempt_outcome(outcome) VALUES ('succeeded'),('failed'),('interrupt
 INSERT INTO review_round_kind(kind) VALUES ('discovery'),('fix_check');
 INSERT INTO run DEFAULT VALUES;
 INSERT INTO run_event DEFAULT VALUES;
+INSERT INTO run_event DEFAULT VALUES;
 INSERT INTO author_revision DEFAULT VALUES;
 INSERT INTO logical_session DEFAULT VALUES;
 INSERT INTO human_answer(id) VALUES (1),(2),(3),(4),(5),(6),(7);
@@ -235,13 +236,14 @@ INSERT INTO run_profile_resolution(run_id, profile_id, provider, model, resolved
 -- Кампания 1 на стадии 7: два слота, круг discovery и круг fix_check.
 -- Кампания 2 на стадии 8: два слота, только discovery.
 INSERT INTO review_campaign(id, run_id, stage_id, expected_lane_count) VALUES
-  (1, 1, 7, 2), (2, 1, 8, 2), (3, 1, 9, 2);
+  (1, 1, 7, 2), (2, 1, 8, 2), (3, 1, 9, 2), (9, 1, 99, 1);
 INSERT INTO review_round(id, campaign_id, round_no, kind, preceding_revision_id) VALUES
   (1, 1, 1, 'discovery', NULL),
   (2, 1, 2, 'fix_check', 1),
   (3, 2, 1, 'discovery', NULL);
 INSERT INTO review_lane(id, campaign_id, run_id, lane_index) VALUES
-  (1, 1, 1, 0), (2, 1, 1, 1), (3, 2, 1, 0), (4, 2, 1, 1);
+  (1, 1, 1, 0), (2, 1, 1, 1), (3, 2, 1, 0), (4, 2, 1, 1),
+  (9, 9, 1, 0); -- отдельный слот без детей для изолированного REPLACE
 INSERT INTO lane_assignment(id, lane_id, run_id, generation, profile_id, event_id, assigned_at)
 VALUES (1, 1, 1, 1, 'p-a', 1, 100),
        (2, 2, 1, 1, 'p-b', 1, 100),
@@ -321,13 +323,46 @@ VALUES (2, 1, 3, 'p-c', 5, 1, 1, 200);
 INSERT INTO lane_assignment(lane_id, run_id, generation, profile_id, replaces_id, human_answer_id, event_id, assigned_at)
 VALUES (2, 1, 2, 'p-c', 2, 2, 1, 200);
 
--- @step 12 UPDATE прежнего назначения
+-- Каждый дизъюнкт immutable-trigger меняет ровно одно поле назначения 5,
+-- на которое в этой точке ещё нет child-FK.
+-- @step 12a lane_id назначения immutable
 -- @expect error immutable
-UPDATE lane_assignment SET profile_id = 'p-c' WHERE id = 2;
+UPDATE lane_assignment SET lane_id = 1 WHERE id = 5;
+
+-- @step 12b generation назначения immutable
+-- @expect error immutable
+UPDATE lane_assignment SET generation = 3 WHERE id = 5;
+
+-- @step 12c profile_id назначения immutable
+-- @expect error immutable
+UPDATE lane_assignment SET profile_id = 'p-c' WHERE id = 5;
+
+-- @step 12d assigned_at назначения immutable
+-- @expect error immutable
+UPDATE lane_assignment SET assigned_at = 201 WHERE id = 5;
+
+-- @step 12e event_id назначения immutable
+-- @expect error immutable
+UPDATE lane_assignment SET event_id = 2 WHERE id = 5;
+
+-- @step 12f replaces_id назначения immutable
+-- @expect error immutable
+UPDATE lane_assignment SET replaces_id = 1 WHERE id = 5;
+
+-- @step 12g human_answer_id назначения immutable
+-- @expect error immutable
+UPDATE lane_assignment SET human_answer_id = 2 WHERE id = 5;
 
 -- @step 13 DELETE назначения: цепочка поколений не переписывается удалением
 -- @expect error never deleted
 DELETE FROM lane_assignment WHERE id = 5;
+
+-- @step 13a REPLACE не сбрасывает поколение и привязку ответа
+-- @expect error never deleted
+INSERT OR REPLACE INTO lane_assignment(
+  id, lane_id, run_id, generation, profile_id, replaces_id,
+  human_answer_id, event_id, assigned_at
+) VALUES (5, 2, 1, 2, 'p-e', 2, 1, 1, 200);
 
 -- @step 14 привязка логической сессии к назначению
 -- @expect ok
@@ -344,6 +379,11 @@ UPDATE review_lane SET campaign_id = 2 WHERE id = 1;
 -- @step 17 DELETE слота
 -- @expect error never deleted
 DELETE FROM review_lane WHERE id = 1;
+
+-- @step 17a REPLACE не обходит append-only слот
+-- @expect error never deleted
+INSERT OR REPLACE INTO review_lane(id, campaign_id, run_id, lane_index)
+VALUES (9, 9, 1, 0);
 
 -- @step 18 попытка: своё поколение под чужим слотом
 -- @expect error FOREIGN KEY
@@ -538,6 +578,12 @@ UPDATE lane_waiver SET lane_id = 3 WHERE campaign_id = 2;
 -- @step 42 DELETE waiver: закрытый круг не становится задним числом неполным
 -- @expect error never deleted
 DELETE FROM lane_waiver WHERE campaign_id = 2;
+
+-- @step 42a REPLACE не убирает durable waiver задним числом
+-- @expect error never deleted
+INSERT OR REPLACE INTO lane_waiver(
+  campaign_id, round_no, lane_id, human_answer_id, event_id, created_at
+) VALUES (2, 1, 4, 2, 1, 300);
 
 -- Худший случай: waiver выписан и второй линии кампании 2 (ответ 4),
 -- то есть кворум понижен полностью.

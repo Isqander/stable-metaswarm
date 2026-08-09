@@ -88,8 +88,12 @@ scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_imm
 scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_input_immutable::author_attempt_id	22k
 scripts/checks/audit-lifecycle.sql	finding_round::CHECK ((reviewer_decision IS NULL) = (reviewer_attempt_id IS NULL))	23a
 scripts/checks/audit-lifecycle.sql	finding_round::CHECK ((reviewer_decision IS NULL) = (decided_at IS NULL))	23
-scripts/checks/audit-lifecycle.sql	TRIGGER:trg_finding_round_decision_once	25
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_decision_once::reviewer_decision	25a
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_decision_once::reviewer_attempt_id	25b
+scripts/checks/audit-lifecycle.sql	TRIGGER-UPDATE-OF:trg_finding_round_decision_once::decided_at	25c
 scripts/checks/audit-lifecycle.sql	TRIGGER:trg_finding_round_no_delete	26
+scripts/checks/audit-lifecycle.sql	TRIGGER:trg_event_immutable	31
+scripts/checks/audit-lifecycle.sql	TRIGGER:trg_event_no_delete	32
 
 # --- scope-keys: корень scope ---
 scripts/checks/scope-keys.sql	review_campaign::FOREIGN KEY (stage_id, run_id)	01
@@ -106,6 +110,7 @@ scripts/checks/scope-keys.sql	review_observation::FOREIGN KEY (campaign_id, subj
 scripts/checks/scope-keys.sql	review_observation::FOREIGN KEY (attempt_id, revision)	11
 scripts/checks/scope-keys.sql	review_observation::FOREIGN KEY (attempt_id, lane_id)	12
 scripts/checks/scope-keys.sql	review_observation::FOREIGN KEY (attempt_id, round_id)	13
+scripts/checks/scope-keys.sql	TRIGGER:trg_observation_unchanged_from	07a
 
 # --- scope-keys: личность и круг по замечанию ---
 scripts/checks/scope-keys.sql	finding::FOREIGN KEY (first_observation_id, first_round_id)	16
@@ -147,7 +152,14 @@ scripts/checks/scope-keys.sql	human_question::FOREIGN KEY (campaign_id, run_id)	
 
 # --- roster-model: слот, поколения, waiver ---
 scripts/checks/roster-model.sql	TRIGGER:trg_lane_assignment_chain	06
-scripts/checks/roster-model.sql	TRIGGER:trg_lane_assignment_immutable	12
+scripts/checks/roster-model.sql	TRIGGER-WHEN:trg_lane_assignment_immutable::NEW.lane_id <> OLD.lane_id	12a
+scripts/checks/roster-model.sql	TRIGGER-WHEN:trg_lane_assignment_immutable::NEW.generation <> OLD.generation	12b
+scripts/checks/roster-model.sql	TRIGGER-WHEN:trg_lane_assignment_immutable::NEW.profile_id <> OLD.profile_id	12c
+scripts/checks/roster-model.sql	TRIGGER-WHEN:trg_lane_assignment_immutable::NEW.assigned_at <> OLD.assigned_at	12d
+scripts/checks/roster-model.sql	TRIGGER-WHEN:trg_lane_assignment_immutable::NEW.event_id <> OLD.event_id	12e
+scripts/checks/roster-model.sql	TRIGGER-WHEN:trg_lane_assignment_immutable::NEW.replaces_id IS NOT OLD.replaces_id	12f
+scripts/checks/roster-model.sql	TRIGGER-WHEN:trg_lane_assignment_immutable::NEW.human_answer_id IS NOT OLD.human_answer_id	12g
+scripts/checks/roster-model.sql	TRIGGER-WHEN:trg_lane_assignment_immutable::OLD.session_id IS NOT NULL	15
 scripts/checks/roster-model.sql	TRIGGER:trg_lane_assignment_no_delete	13
 scripts/checks/roster-model.sql	TRIGGER:trg_lane_immutable	16
 scripts/checks/roster-model.sql	TRIGGER:trg_lane_no_delete	17
@@ -162,7 +174,15 @@ scripts/checks/roster-model.sql	lane_waiver::FOREIGN KEY (campaign_id, lane_id)	
 # --- campaign-open: переходы, снимок, допуск ---
 scripts/checks/campaign-open.sql	TRIGGER:trg_campaign_state_transition	12
 scripts/checks/campaign-open.sql	TRIGGER:trg_campaign_initial_state	02
-scripts/checks/campaign-open.sql	TRIGGER:trg_campaign_snapshot_immutable	11a
+scripts/checks/campaign-open.sql	TRIGGER-WHEN:trg_campaign_snapshot_immutable::NEW.run_id <> OLD.run_id	11c
+scripts/checks/campaign-open.sql	TRIGGER-WHEN:trg_campaign_snapshot_immutable::NEW.stage_id <> OLD.stage_id	11d
+scripts/checks/campaign-open.sql	TRIGGER-WHEN:trg_campaign_snapshot_immutable::NEW.subject_id <> OLD.subject_id	11e
+scripts/checks/campaign-open.sql	TRIGGER-WHEN:trg_campaign_snapshot_immutable::NEW.ordinal <> OLD.ordinal	11f
+scripts/checks/campaign-open.sql	TRIGGER-WHEN:trg_campaign_snapshot_immutable::NEW.severity_threshold <> OLD.severity_threshold	11b
+scripts/checks/campaign-open.sql	TRIGGER-WHEN:trg_campaign_snapshot_immutable::NEW.policy_version <> OLD.policy_version	11g
+scripts/checks/campaign-open.sql	TRIGGER-WHEN:trg_campaign_snapshot_immutable::NEW.expected_lane_count <> OLD.expected_lane_count	11a
+scripts/checks/campaign-open.sql	TRIGGER-WHEN:trg_campaign_snapshot_immutable::NEW.opened_at <> OLD.opened_at	11h
+scripts/checks/campaign-open.sql	TRIGGER-WHEN:trg_campaign_snapshot_immutable::NEW.public_id <> OLD.public_id	11i
 scripts/checks/campaign-open.sql	TRIGGER:trg_lane_index_bounds	05
 scripts/checks/campaign-open.sql	TRIGGER:trg_exposure_immutable	32a
 scripts/checks/campaign-open.sql	TRIGGER:trg_exposure_no_delete	32b

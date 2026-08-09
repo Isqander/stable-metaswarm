@@ -2,6 +2,27 @@
 -- reviewer decision вошёл в историю кругов. Проверка отдельно фиксирует
 -- INSERT OR REPLACE: прямого DELETE-теста недостаточно без recursive_triggers.
 
+CREATE TABLE run_event (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id       INTEGER NOT NULL,
+  kind         TEXT    NOT NULL,
+  payload_json TEXT    NOT NULL,
+  core_version TEXT    NOT NULL,
+  created_at   INTEGER NOT NULL
+);
+
+CREATE TRIGGER trg_event_immutable
+BEFORE UPDATE ON run_event
+BEGIN
+  SELECT RAISE(ABORT, 'run_event is append-only');
+END;
+
+CREATE TRIGGER trg_event_no_delete
+BEFORE DELETE ON run_event
+BEGIN
+  SELECT RAISE(ABORT, 'run_event is append-only');
+END;
+
 CREATE TABLE human_question (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   public_id     TEXT,
@@ -20,7 +41,6 @@ CREATE TABLE human_question (
   reask_count   INTEGER DEFAULT 0
 );
 
--- @mutation-cover-update-of trg_question_content_immutable
 CREATE TRIGGER trg_question_content_immutable
 BEFORE UPDATE OF
   id, public_id, run_id, branch_id, stage_id, campaign_id, round_id,
@@ -81,7 +101,6 @@ CREATE TABLE finding_round (
 );
 
 -- Координаты круга и ответ автора задаются при INSERT и потом не меняются.
--- @mutation-cover-update-of trg_finding_round_input_immutable
 CREATE TRIGGER trg_finding_round_input_immutable
 BEFORE UPDATE OF
   id, campaign_id, run_id, finding_id, round_no, round_id, owner_lane_id,
@@ -357,6 +376,19 @@ SET reviewer_decision = 'still_present', reviewer_attempt_id = 61,
     decided_at = 131
 WHERE id = 1;
 
+-- UPDATE OF — три независимых входа trigger'а; каждый получает свой шаг.
+-- @step 25a reviewer_decision нельзя переписать отдельно
+-- @expect error reviewer decision is terminal
+UPDATE finding_round SET reviewer_decision = 'insists' WHERE id = 1;
+
+-- @step 25b reviewer_attempt_id нельзя переписать отдельно
+-- @expect error reviewer decision is terminal
+UPDATE finding_round SET reviewer_attempt_id = 61 WHERE id = 1;
+
+-- @step 25c decided_at нельзя переписать отдельно
+-- @expect error reviewer decision is terminal
+UPDATE finding_round SET decided_at = 131 WHERE id = 1;
+
 -- @step 26 finding_round нельзя удалить
 -- @expect error cannot be deleted
 DELETE FROM finding_round WHERE id = 1;
@@ -375,3 +407,22 @@ SELECT q.snapshot_json, a.chosen_option, fr.reviewer_decision,
 FROM human_question q
 JOIN human_answer a ON a.question_id = q.id
 JOIN finding_round fr ON fr.id = 1;
+
+-- @step 30 событие сохраняется append-only
+-- @expect ok
+INSERT INTO run_event(run_id, kind, payload_json, core_version, created_at)
+VALUES (1, 'test', '{}', 'v1', 100);
+
+-- @step 31 событие нельзя обновить
+-- @expect error append-only
+UPDATE run_event SET payload_json = '{"changed":true}' WHERE id = 1;
+
+-- @step 32 событие нельзя удалить
+-- @expect error append-only
+DELETE FROM run_event WHERE id = 1;
+
+-- @step 33 REPLACE не обходит append-only событие
+-- @expect error append-only
+INSERT OR REPLACE INTO run_event(
+  id, run_id, kind, payload_json, core_version, created_at
+) VALUES (1, 1, 'changed', '{}', 'v2', 200);

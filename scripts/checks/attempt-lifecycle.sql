@@ -37,7 +37,6 @@ CREATE TABLE step_attempt (
   transcript_digest  TEXT
 );
 
--- @mutation-cover-when trg_attempt_initial_state
 CREATE TRIGGER trg_attempt_initial_state
 BEFORE INSERT ON step_attempt
 WHEN NEW.outcome           IS NOT NULL
@@ -51,7 +50,6 @@ BEGIN
   SELECT RAISE(ABORT, 'step_attempt must start active');
 END;
 
--- @mutation-cover-when trg_attempt_finish_once
 CREATE TRIGGER trg_attempt_finish_once
 BEFORE UPDATE ON step_attempt
 WHEN NEW.id                 IS NOT OLD.id
@@ -107,7 +105,6 @@ BEGIN
   SELECT RAISE(ABORT, 'review_round must start open');
 END;
 
--- @mutation-cover-when trg_round_finish_once
 CREATE TRIGGER trg_round_finish_once
 BEFORE UPDATE ON review_round
 WHEN NEW.id                    IS NOT OLD.id
