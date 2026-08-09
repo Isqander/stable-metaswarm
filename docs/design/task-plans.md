@@ -266,8 +266,8 @@ already-terminal.
 терминальная с `closed_at = NULL` не вставляются. Отдельная lifecycle-матрица
 доказывает attempt/round: обе строки рождаются active/open,
 input не меняется, terminal result записывается один раз, возврат в active и
-DELETE запрещены; `review_observation`, `finding_observation_link` и
-`finding_resolution` не обновляются, не удаляются и не заменяются через
+DELETE запрещены; все десять полностью append-only review-core таблиц §1.5,
+включая `severity_override`, не обновляются, не удаляются и не заменяются через
 `INSERT OR REPLACE`. Вопрос сохраняет показанные scope/reason/text/options/
 snapshot, принятый ответ append-only, а `finding_round` один раз получает
 reviewer decision без изменения input/author-части. Отдельная параметризованная

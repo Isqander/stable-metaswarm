@@ -1,7 +1,7 @@
 # Схема состояния: SQLite
 
 **Текущий инвентарь после C-21/C-23:** **65 таблиц, 33 явных индекса,
-7 представлений и 45 триггеров**. Числа получены механическим подсчётом
+7 представлений и 47 триггеров**. Числа получены механическим подсчётом
 нормативных `CREATE`-операторов; 27 закрытых справочников не изменились.
 Исторические числа `61/24/6/6` относятся к шестой редакции; после неё вошли
 модель effective roster (C-01b) — **+2 таблицы,
@@ -21,7 +21,8 @@ C-04: **+1 таблица** (`campaign_transition`), **+4 индекса**, **+8
 допуска и у резолюции профиля.
 Один lifecycle-заход C-07/C-08 добавил **+9 триггеров** для attempt/round и
 трёх evidence-таблиц; adversarial-проход — ещё **+8** для вопроса, ответа и
-`finding_round`. Остальные schema-effects того же свода (ограничения
+`finding_round`; защита принятого `severity_override` — ещё **+2**. Остальные
+schema-effects того же свода (ограничения
 `max_author_revisions >= 1` и `UNIQUE(finding_id, event_id)`) внесены одним
 заходом; они не добавляют именованных schema-объектов и текущий inventory не
 меняют. Связный прогон DDL после них проверяет не только число объектов, но и
@@ -47,13 +48,14 @@ active/open начальную форму, неизменяемость кажд
 terminal-переход попытки и круга и запрет UPDATE/DELETE evidence-строк.
 Пятый, `audit-lifecycle.sql`, — 50 сценариев на immutable content вопроса,
 append-only ответ, однократный reviewer decision и обходы через `INSERT OR
-REPLACE`. Шестой, `schema-constraints.sql`, — 10 сценариев C-21/C-23: минимум
-cap, duplicate override и две ортогональные допустимые пары. Все шесть
+REPLACE`. Шестой, `schema-constraints.sql`, — 14 сценариев C-21/C-23: минимум
+cap, duplicate override, две ортогональные допустимые пары и полный lifecycle
+override. Все шесть
 воспроизводятся одной командой и падают ненулевым кодом при
 любом расхождении ожиданий:
 `python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
 можно передать несколько).
-Доказаны 182 мутационных случая из 183 (случай может снимать несколько
+Доказаны 184 мутационных случая из 185 (случай может снимать несколько
 перекрывающихся ключей сразу), один — признанный долг; манифест умеет держать и признанный долг
 (`todo: <причина>`), который считается недоказанным и виден в итоге отдельным
 числом.
@@ -61,7 +63,7 @@ cap, duplicate override и две ортогональные допустимы�
 **Покрытие манифеста неполное, и это счётная величина, а не оценка.** Режим
 `mutation-check.py --coverage scripts/checks/mutations.tsv` перечисляет
 ограничения сценарных файлов, у которых нет ни одной строки манифеста: на
-2026-08-09 таких **42 из 152**. Дополнительно granular coverage по умолчанию
+2026-08-09 таких **42 из 154**. Дополнительно granular coverage по умолчанию
 считает каждый многосоставный trigger: все **55/55** верхнеуровневых ветвей
 `WHEN ... OR` и все **27/27** колонок `UPDATE OF` имеют отдельную мутацию и
 назначенный шаг. Строка на trigger целиком больше не выдаётся за доказательство
@@ -74,9 +76,13 @@ cap, duplicate override и две ортогональные допустимы�
 существенна. Механизмы разные: первое ловит structural `--coverage`, второе —
 статус `todo:`, третье — обязательные granular rows. Ещё один режим,
 `mutation-check.py --schema-sync docs/design/db-schema.md scripts/checks`,
-сверяет все нормативные trigger'ы с исполняемыми стабами: сейчас **45/45**
-объектов присутствуют и совпадают дословно после снятия комментариев и
-пробелов. Поэтому отсутствующий во всех стабах объект тоже становится видимым.
+сверяет design со стабами в обе стороны. Все **47/47** нормативных trigger'ов
+присутствуют и совпадают дословно после снятия комментариев и пробелов. Для
+ограничений таблиц отчёт отдельно показывает **132 нормативных / 107 покрытых /
+25 без сценария**, 127 сценарных вхождений и 0 лишних. Поэтому отсутствующий во
+всех стабах объект либо `CHECK`/FK/UNIQUE тоже становится видимым. Режим
+возвращает ненулевой код, пока эти 25 не получат исполняемые свидетели;
+зелёная trigger-parity не выдаётся за полную parity схемы.
 Из structural-счёта осознанно исключены два класса:
 инлайновые одноколоночные `REFERENCES` в объявлении колонки (тривиальный случай,
 плюс FK на закрытые справочники доказывает отдельный манифест T1.3) и
@@ -98,7 +104,7 @@ T1.2, repository-примитивы (`reserve_reviewer_exposure()`) — T1.3, п
 утверждение о текущей редакции: её inventory указан в шапке. Текущая связная
 нормативная DDL воспроизводимо исполняется командой
 `python3 scripts/checks/run-sql-check.py --design-schema docs/design/db-schema.md`:
-inventory `65/33/7/45`, семь views читаются, `foreign_key_check` пуст, точный
+inventory `65/33/7/47`, семь views читаются, `foreign_key_check` пуст, точный
 readback PRAGMA равен `wal/1/2/5000/0/1`, оба ограничения C-21/C-23 видны в
 `sqlite_master`. Отдельными
 негативными вставками проверены enum-FK, policy verdict и производные состояния
@@ -125,7 +131,7 @@ DDL. Документ отвечает на вопрос, на который р
 | Порядок работ | `task-plans.md` |
 
 В конце — §14: список мест, где проектирование **уточнило или дополнило**
-решение. Читать обязательно: там двадцать восемь уточнений с обоснованием,
+решение. Читать обязательно: там двадцать девять уточнений с обоснованием,
 включая одну необязательную возможность.
 
 ---
@@ -271,7 +277,7 @@ SQLite не умеет запрещать UPDATE/DELETE декларативно
 
 - **полностью append-only:** `run_event`, `review_lane`, `lane_waiver`,
   `review_observation`, `finding_observation_link`, `finding_resolution`,
-  `reviewer_exposure`, `run_profile_resolution`,
+  `severity_override`, `reviewer_exposure`, `run_profile_resolution`,
   `human_question_observation`, `human_answer`; у каждой есть пара
   `BEFORE UPDATE`/`BEFORE DELETE ... RAISE(ABORT)`;
 - **управляемый lifecycle:** `step_attempt` рождается active и один раз
@@ -591,7 +597,7 @@ END;
 | Retry/crash | CAS различает missing и already-terminal; после неясного commit повтор не переписывает факт, recovery читает сохранённый terminal result |
 | База / операция / recovery | Триггеры держат форму и lifecycle; repository держит CAS и типизированные ошибки; workflow — атомарность с соседними строками/событием; recovery только диагностирует незавершённое |
 | Негативные контрпримеры | `scripts/checks/attempt-lifecycle.sql`: terminal INSERT, каждая группа input/scope, преждевременный result, повтор/откат terminal, DELETE всех пяти durable-классов |
-| Синхронизация | T1.2 inventory `65/33/7/45`; T1.3 API, INV/FAIL/AC/V; граф задач T1.3; статус C-07/C-08 в своде |
+| Синхронизация | T1.2 inventory `65/33/7/47`; T1.3 API, INV/FAIL/AC/V; граф задач T1.3; статус C-07/C-08 в своде |
 
 `AttemptRepository.complete_attempt()` выполняет один CAS:
 
@@ -2445,13 +2451,29 @@ CREATE TABLE severity_override (
   created_at    INTEGER NOT NULL,
   UNIQUE (finding_id, event_id)
 );
+
+CREATE TRIGGER trg_severity_override_immutable
+BEFORE UPDATE ON severity_override
+BEGIN
+  SELECT RAISE(ABORT, 'severity_override is append-only');
+END;
+
+CREATE TRIGGER trg_severity_override_no_delete
+BEFORE DELETE ON severity_override
+BEGIN
+  SELECT RAISE(ABORT, 'severity_override is append-only');
+END;
 ```
 
 Одна пара `finding_id + event_id` имеет не более одного override. Это именно
 составная граница: одно человеческое событие может изменить несколько findings,
 а один finding — получить новый override в более позднем событии. Без неё два
 override одной пары одновременно становились «последними» и раздваивали строку
-в `finding_last_override`, а затем и в `finding_severity`.
+в `finding_last_override`, а затем и в `finding_severity`. Строка — принятое
+аудируемое решение человека, поэтому она append-only: иначе `DELETE` либо
+`INSERT OR REPLACE` обходят `UNIQUE`, задним числом меняют последний override и
+тем самым порог эскалации. Запрет скрытого DELETE при REPLACE опирается на
+обязательный `recursive_triggers=ON` (§1.1).
 
 Override не закрывает период (`decision.md` §6.3), дальше действует
 `max(override, наблюдения после override)` — реализовано отсечкой по
@@ -3301,7 +3323,7 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 6 | Кап проверяется в момент решения «продолжать ли» | **Код** | Единственная точка принятия решения в `review.transition`; проверка `review_check_count <= max_author_revisions + 1` — assert, а не гейт |
 | 7 | Личность выдаётся один раз | **База** | `finding.public_id` UNIQUE в прогоне; `first_observation_id` UNIQUE; пересчёта нет в коде |
 | 8 | Каждое наблюдение несёт `severity_suggested` либо `unchanged_from`; severity в enum; ссылка назад, без циклов | **База + код** | `CHECK ((a IS NULL) <> (b IS NULL))`, FK на `severity_scale`, триггер обратной ссылки и равенства унаследованной severity; «тот же finding и период» — T1.6 до direct link либо после reconciliation |
-| 9 | `escalation_severity` монотонна вверх | **База** | Вычисляется `MAX(rank)` по периоду; понизить нечего; `UNIQUE(finding_id, event_id)` не даёт двум override одновременно стать последними и раздвоить view |
+| 9 | `escalation_severity` монотонна вверх | **База** | Вычисляется `MAX(rank)` по периоду; понизить нечего; `UNIQUE(finding_id, event_id)` не даёт двум override одновременно стать последними и раздвоить view, а immutable/no-delete trigger'ы вместе с `recursive_triggers=ON` не дают удалить либо подменить принятое решение |
 | 10 | Исход ревьюера совместим с disposition | **База** | CHECK в `finding_round` — **с явной проверкой `disposition IS NOT NULL`**, иначе NULL проходит |
 | 11 | Решение выносит владелец круга, оно единственное | **База + код** | Одна колонка `reviewer_decision`; запрос §5.2 проверяет роль, stage, outcome и `lane_id = owner_lane_id`; у `post_check` решения быть не может по CHECK |
 | 12 | Новая кампания не получает прежнюю сессию | **База + код** | `reviewer_exposure` как факт допуска (`UNIQUE` не даёт появиться дублю) + отбор линий по свободным парам provider+model; замена исполнителя слота проходит тот же отбор |
@@ -3540,8 +3562,8 @@ INSERT INTO verification_status(status) VALUES ('green'),('red'),('error');
 
 ## 14. Уточнения к `decision.md`
 
-Проектирование и последующее ревью таск-планов дали двадцать восемь уточнений:
-двадцать шесть мест, где решение чего-то не учло, и одна возможность (пункт 5).
+Проектирование и последующее ревью таск-планов дали двадцать девять уточнений:
+двадцать восемь мест, где решение чего-то не учло, и одна возможность (пункт 5).
 Ни одно из принятых
 решений не отменяется — но без этих уточнений часть из них нереализуема.
 
@@ -3988,9 +4010,20 @@ T1.2. Рядом закрыт соседний audit-шов: scope/reason/presen
 
 Доказательство тоже не opt-in: `mutation-check.py --coverage` требует отдельный
 свидетель каждой ветви многосоставного `WHEN` и каждой колонки многоколоночного
-`UPDATE OF`, а `--schema-sync` сверяет полный набор и тела нормативных trigger'ов
-со стабами. Для каждой полностью append-only таблицы §1.5 обязательны оба пути —
-прямой DELETE и конфликтующий REPLACE.
+`UPDATE OF`, а `--schema-sync` сверяет со стабами полный набор и тела
+нормативных trigger'ов и table-level `CHECK`/FK/`UNIQUE`. Для каждой полностью
+append-only таблицы §1.5 обязательны оба пути — прямой DELETE и конфликтующий
+REPLACE.
+
+**29. UNIQUE ограничивает новые строки, но не делает принятое решение
+неизменяемым.** C-23 запретил второй `severity_override` одной пары
+finding/event, однако прямой DELETE и конфликтующий `INSERT OR REPLACE`
+удаляли прежнюю строку. Это меняло `finding_last_override`, а следом и порог
+эскалации, задним числом. Поскольку строка ссылается на `human_answer_id` и
+фиксирует решение человека, она относится к тому же audit-классу, что
+`human_answer`: два append-only trigger'а плюс обязательный
+`recursive_triggers=ON`. Наличие user-facing producer'а C-22 на эту физическую
+гарантию не влияет.
 
 ### Что было неверно в первой редакции этого документа
 
@@ -4007,6 +4040,7 @@ T1.2. Рядом закрыт соседний audit-шов: scope/reason/presen
 | `author_revision.attempt_id` — простой FK | Ссылка на попытку ревьюера или на `failed` не отвергалась; инвариант 5 держал код, а не база | Составные FK по `(id, role)` и `(id, outcome)` + CHECK |
 | `severity_effective` при `unchanged_from` ничем не проверялась | Денормализация превращалась в третий путь записи severity | Триггер сравнивает с родительским значением |
 | `severity_override` не был уникален по `(finding_id, event_id)` | Два override одного finding в одном событии оба становились последними и раздваивали `finding_severity` | Составной `UNIQUE`; разные findings одного события и разные события одного finding разрешены |
+| `severity_override` после добавления `UNIQUE` оставался удаляемым | DELETE либо REPLACE обходил гарантию единственного принятого решения и менял последний override задним числом | Append-only UPDATE/DELETE trigger'ы; отдельно проверены прямой DELETE, REPLACE и сохранность строки |
 
 Все найдены внешним ревью и воспроизведены исполнением до внесения правок. Два
 урока, которые стоит держать при дальнейшей работе:

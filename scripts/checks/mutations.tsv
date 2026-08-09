@@ -8,6 +8,8 @@
 # --- schema-constraints: C-21/C-23 ---
 scripts/checks/schema-constraints.sql	stage_execution::CHECK (max_author_revisions >= 1)	03
 scripts/checks/schema-constraints.sql	severity_override::UNIQUE (finding_id, event_id)	11
+scripts/checks/schema-constraints.sql	TRIGGER:trg_severity_override_immutable	16
+scripts/checks/schema-constraints.sql	TRIGGER:trg_severity_override_no_delete	18
 
 # --- attempt-lifecycle: C-07/C-08 ---
 scripts/checks/attempt-lifecycle.sql	TRIGGER-WHEN:trg_attempt_initial_state::NEW.outcome IS NOT NULL	02a

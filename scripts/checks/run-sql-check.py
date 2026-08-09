@@ -37,10 +37,11 @@
 
 import json
 import os
-import re
 import sqlite3
 import sys
 import tempfile
+
+from schema_utils import declared_inventory, execute_design_schema
 
 
 class Step:
@@ -202,36 +203,6 @@ def main(path: str) -> int:
     return 1 if failed else 0
 
 
-def _sql_fences(markdown: str):
-    """Возвращает statements из fenced-блоков ```sql в порядке документа."""
-    inside = False
-    buffer = ""
-    for line in markdown.splitlines(True):
-        marker = line.strip()
-        if marker == "```sql":
-            inside = True
-            buffer = ""
-            continue
-        if inside and marker == "```":
-            if buffer.strip():
-                raise ValueError("оборванный SQL statement перед закрытием fence")
-            inside = False
-            continue
-        if not inside:
-            continue
-        buffer += line
-        if sqlite3.complete_statement(buffer):
-            yield buffer.strip()
-            buffer = ""
-    if inside or buffer.strip():
-        raise ValueError("незакрытый SQL fence или statement")
-
-
-def _statement_head(statement: str) -> str:
-    without_comments = re.sub(r"(?m)^\s*--.*(?:\n|$)", "", statement)
-    return without_comments.lstrip().upper()
-
-
 def run_design_schema(path: str) -> int:
     """Исполняет связную нормативную DDL и seed'ы прямо из db-schema.md."""
     for stream in (sys.stdout, sys.stderr):
@@ -241,27 +212,10 @@ def run_design_schema(path: str) -> int:
     with open(path, encoding="utf-8") as fh:
         markdown = fh.read()
 
-    inventory_match = re.search(
-        r"\*\*(\d+) таблиц,\s*(\d+) явных индекса,\s*"
-        r"(\d+) представлений и (\d+) триггеров\*\*",
-        markdown,
-    )
-    if inventory_match is None:
+    expected = declared_inventory(markdown)
+    if expected is None:
         print("FAIL  в шапке не найден нормативный inventory", file=sys.stderr)
         return 2
-    expected = tuple(int(value) for value in inventory_match.groups())
-
-    try:
-        statements = list(_sql_fences(markdown))
-    except ValueError as exc:
-        print("FAIL  %s" % exc, file=sys.stderr)
-        return 2
-
-    schema_statements = []
-    for statement in statements:
-        head = _statement_head(statement)
-        if head.startswith("CREATE ") or head.startswith("INSERT INTO "):
-            schema_statements.append(statement)
 
     fd, db_path = tempfile.mkstemp(prefix="metaswarm-schema-", suffix=".sqlite3")
     os.close(fd)
@@ -286,8 +240,7 @@ def run_design_schema(path: str) -> int:
             print("FAIL  PRAGMA: ждали %s, получили %s"
                   % (expected_pragmas, pragma_values))
             return 1
-        for statement in schema_statements:
-            con.execute(statement)
+        execute_design_schema(con, markdown)
         con.commit()
 
         actual_by_type = dict(con.execute(

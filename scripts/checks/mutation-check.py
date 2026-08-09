@@ -21,6 +21,13 @@
 недостающие строки в формате манифеста, чтобы их оставалось только заполнить
 шагом, и возвращает ненулевой код, пока разрыв есть.
 
+`--schema-sync` закрывает другую слепую зону: нормативного объекта может не
+быть ни в одном сценарном файле, и тогда обычному coverage нечего считать.
+Режим строит design и каждый стаб в SQLite, сверяет trigger'ы дословно, а
+table-level `CHECK`/FK/`UNIQUE` — как нормализованные элементы таблиц в обе
+стороны. Непокрытый нормативный constraint считается долгом и даёт ненулевой
+exit, даже если trigger-parity чистая.
+
 Манифест — TSV: sql-файл, мутация, ожидаемый шаг и необязательный статус.
 Статус `todo: <причина>` означает известный долг — такая мутация считается
 **недоказанной** и видна в итоге отдельным числом, а не исчезает из отчёта.
@@ -51,10 +58,13 @@ CHECK не вырезается, а ослабляется до `CHECK (1)`: у�
 
 import io
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from schema_utils import execute_design_schema, table_ddl
 
 RUNNER = Path(__file__).with_name("run-sql-check.py")
 
@@ -347,7 +357,10 @@ def constraints_of(sql: str, referenced):
             elif sql[i] == ")":
                 depth -= 1
             i += 1
-        body = split_top_level(sql[start:i - 1])
+        # Комментарий может содержать запятую. Если делить раньше, хвост
+        # комментария становится началом следующего item и реальный FK после
+        # него тихо исчезает из inventory ограничений.
+        body = split_top_level(strip_comments(sql[start:i - 1]))
         pk = next((re.match(r"(\w+)", c).group(1) for c in body
                    if "PRIMARY KEY" in c and re.match(r"\w+\s+\w+", c)), None)
         for item in body:
@@ -427,7 +440,7 @@ def normalized_trigger(block: str) -> str:
 
 
 def run_schema_sync(design_path: str, scenario_dir: str) -> int:
-    """Сверить все нормативные trigger'ы design с исполняемыми стабами."""
+    """Сверить trigger'ы и table constraints design со стабами в обе стороны."""
     design = io.open(design_path, encoding="utf-8").read()
     normative_rows = trigger_blocks(design)
     scenarios = sorted(Path(scenario_dir).glob("*.sql"))
@@ -476,7 +489,8 @@ def run_schema_sync(design_path: str, scenario_dir: str) -> int:
 
     print(
         chr(10)
-        + "нормативных %d / в сценариях %d / совпало %d / без сценария %d / "
+        + "trigger'ов: нормативных %d / в сценариях %d / совпало %d / "
+          "без сценария %d / "
           "расходятся %d / лишних %d / дублей %d"
         % (
             len(normative), len(actual), matched, len(missing),
@@ -484,8 +498,84 @@ def run_schema_sync(design_path: str, scenario_dir: str) -> int:
             len(duplicate_normative) + len(duplicate_scenarios),
         )
     )
-    return 1 if (missing or extra or different or duplicate_normative
-                 or duplicate_scenarios) else 0
+    trigger_bad = bool(missing or extra or different or duplicate_normative
+                       or duplicate_scenarios)
+
+    # Trigger parity недостаточно: CHECK/FK/UNIQUE внутри CREATE TABLE могли
+    # отсутствовать во всех стабах и потому не попадать даже в --coverage.
+    # Обе стороны читаются из реально созданной SQLite-схемы, а не regexp'ом
+    # по Markdown. Исключения те же, что у structural coverage: инлайновые
+    # одноколоночные REFERENCES и родительские UNIQUE составных FK.
+    try:
+        normative_con = sqlite3.connect(":memory:")
+        normative_con.execute("PRAGMA foreign_keys = ON")
+        normative_con.execute("PRAGMA recursive_triggers = ON")
+        execute_design_schema(normative_con, design)
+        normative_tables = table_ddl(normative_con)
+        normative_con.close()
+
+        scenario_tables = {}
+        for path in scenarios:
+            source = io.open(path, encoding="utf-8").read()
+            ddl = source.partition("-- === данные ===")[0]
+            con = sqlite3.connect(":memory:")
+            con.executescript(ddl)
+            scenario_tables[str(path).replace("\\", "/")] = table_ddl(con)
+            con.close()
+    except (sqlite3.Error, ValueError) as exc:
+        print("BROKEN table parity: %s: %s" % (type(exc).__name__, exc))
+        return 1
+
+    normative_references = referenced_keys(normative_tables)
+    normative_constraints, normative_dead = constraints_of(
+        normative_tables, normative_references
+    )
+    normative_set = set(normative_constraints)
+
+    scenario_references = set().union(*(
+        referenced_keys(source) for source in scenario_tables.values()
+    ))
+    scenario_occurrences = []
+    scenario_dead = []
+    constraint_locations = {}
+    for path, source in scenario_tables.items():
+        constraints, dead = constraints_of(source, scenario_references)
+        scenario_occurrences.extend(constraints)
+        scenario_dead.extend(dead)
+        for constraint in constraints:
+            constraint_locations.setdefault(constraint, []).append(path)
+    scenario_set = set(scenario_occurrences)
+
+    missing_constraints = sorted(normative_set - scenario_set)
+    extra_constraints = sorted(scenario_set - normative_set)
+    covered_constraints = len(normative_set & scenario_set)
+
+    for table, constraint in missing_constraints:
+        print("MISSING-CONSTRAINT  %s::%s" % (table, constraint))
+    for constraint in extra_constraints:
+        table, text = constraint
+        print("EXTRA-CONSTRAINT    %s::%s — %s" % (
+            table, text, ", ".join(constraint_locations[constraint])
+        ))
+    for table, constraint in normative_dead:
+        print("DEAD-CONSTRAINT design %s::%s" % (table, constraint))
+    for table, constraint in scenario_dead:
+        print("DEAD-CONSTRAINT scenario %s::%s" % (table, constraint))
+
+    print(
+        chr(10)
+        + "table constraints: нормативных %d / покрыто %d / без сценария %d / "
+          "уникальных в сценариях %d / вхождений %d / лишних %d / мёртвых %d"
+        % (
+            len(normative_set), covered_constraints, len(missing_constraints),
+            len(scenario_set), len(scenario_occurrences), len(extra_constraints),
+            len(normative_dead) + len(scenario_dead),
+        )
+    )
+    constraint_bad = bool(
+        missing_constraints or extra_constraints or normative_dead or scenario_dead
+    )
+    return 1 if trigger_bad or constraint_bad else 0
 
 
 def run_coverage(path: str) -> int:

@@ -30,6 +30,18 @@ CREATE TABLE severity_override (
   UNIQUE (finding_id, event_id)
 );
 
+CREATE TRIGGER trg_severity_override_immutable
+BEFORE UPDATE ON severity_override
+BEGIN
+  SELECT RAISE(ABORT, 'severity_override is append-only');
+END;
+
+CREATE TRIGGER trg_severity_override_no_delete
+BEFORE DELETE ON severity_override
+BEGIN
+  SELECT RAISE(ABORT, 'severity_override is append-only');
+END;
+
 -- === данные ===
 
 -- @step 01 C-21: минимальное разрешённое значение
@@ -74,3 +86,20 @@ SELECT finding_id, event_id FROM severity_override ORDER BY finding_id, event_id
 -- @step 15 связи с родителями целы
 -- @expect empty
 PRAGMA foreign_key_check;
+
+-- @step 16 принятое решение нельзя переписать
+-- @expect error append-only
+UPDATE severity_override SET finding_id = 2, event_id = 11 WHERE id = 1;
+
+-- @step 17 принятое решение нельзя удалить
+-- @expect error append-only
+DELETE FROM severity_override WHERE id = 1;
+
+-- @step 18 REPLACE не обходит запрет через скрытый DELETE
+-- @expect error append-only
+INSERT OR REPLACE INTO severity_override(id, finding_id, event_id)
+VALUES (1, 2, 11);
+
+-- @step 19 после отказов сохранены те же три допустимые пары
+-- @expect rows-json [[1,10],[1,11],[2,10]]
+SELECT finding_id, event_id FROM severity_override ORDER BY finding_id, event_id;
