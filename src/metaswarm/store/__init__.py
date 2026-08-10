@@ -14,6 +14,11 @@ from .db import (
     WriteOutsideTransactionError,
 )
 from .events import JsonScalar, JsonValue, NewRunEvent, append_run_event
+from .repo._mapping import (
+    RepositoryAlreadyTerminal,
+    RepositoryRecordNotFound,
+    ReviewerExposureConflict,
+)
 
 __all__ = [
     "Database",
@@ -25,6 +30,9 @@ __all__ = [
     "MigrationError",
     "NewRunEvent",
     "ReadSession",
+    "RepositoryAlreadyTerminal",
+    "RepositoryRecordNotFound",
+    "ReviewerExposureConflict",
     "SQLiteValue",
     "StatementResult",
     "StoreClosedError",
