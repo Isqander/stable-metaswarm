@@ -3006,11 +3006,12 @@ END;
 ```
 
 `run_event.payload` принимает не произвольный Python object, а рекурсивный
-JSON-тип: `null`, `bool`, `int`, конечный `float`, `str`, массив таких значений
-или mapping только со строковыми ключами. На входе массива допустимы `list` и
-`tuple`; оба нормализуются в JSON array. Mapping с integer key, `set`, `bytes`,
-не-Mapping пользовательский object, цикл и `NaN`/`Infinity` отвергаются до
-INSERT. `NewRunEvent` рекурсивно копирует прошедший input в обычные временные
+JSON-тип: `null`, `bool`, `int`, конечный `float`, UTF-8-кодируемый `str`, массив
+таких значений или mapping только со строковыми UTF-8-ключами. На входе массива
+допустимы `list` и `tuple`; оба нормализуются в JSON array. Mapping с integer
+key, строка/ключ с code point `U+D800..U+DFFF`, `set`, `bytes`, не-Mapping
+пользовательский object, цикл и `NaN`/`Infinity` отвергаются до INSERT.
+`NewRunEvent` рекурсивно копирует прошедший input в обычные временные
 `dict`/`list`, сразу сериализует их с sorted keys, compact separators,
 `ensure_ascii=false` и `allow_nan=false`, после чего хранит только готовую
 immutable JSON-строку. `append_run_event()` вставляет этот подготовленный снимок

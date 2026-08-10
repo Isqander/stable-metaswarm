@@ -244,14 +244,16 @@ PRAGMA (все шесть), выделенный поток-писатель с 
 единственный способ записи, `run_event` append-only, миграция 0001 со схемой
 целиком. Event payload имеет рекурсивный `JsonValue`: только string-key
 mapping, JSON scalars и list/tuple arrays; до enqueue он копируется в immutable
-снимок, non-string key/cycle/unsupported object/non-finite отвергаются.
+снимок, non-string key, surrogate в строке/ключе, cycle, unsupported object и
+non-finite отвергаются.
 
 **Готово, когда:** попытка записать вне транзакции падает; попытка обновить
 `run_event` падает на триггере; две конкурентные корутины не могут открыть
 вложенную транзакцию; миграция `0001` применяется к пустому файлу целиком и
 `PRAGMA foreign_key_check` не возвращает строк. Nested payload проходит
 JSON-equivalent round-trip, tuple становится array, а integer key не
-превращается молча в строку.
+превращается молча в строку; lone surrogate даёт `EventPayloadError`, а не
+`UnicodeEncodeError` из SQLite/encoder.
 
 ### T1.3 · Схема: репозитории и представления · 3 д
 
@@ -366,7 +368,8 @@ runtime-зависимость от Pydantic; `pyproject.toml` и `uv.lock` ме
 **Готово, когда:** каждый transport/schema-пункт чек-листа
 `agent-contracts.md` §11 имеет тест с битым синтетическим marked output, а
 post-validation boundary — отдельные result/feedback tests; отдельно проверено,
-что новый observation
+что одиночный surrogate escape отклоняется до Pydantic, корректная pair
+принимается, а новый observation
 fix-check не принимает `finding_id`/`unchanged_from`, а пустой массив остаётся
 валидным. Follow-up observation внутри `decisions[*]` сохраняет внешний target
 и не попадает в адаптер T1.5; он допустим при `still_present`/`insists` и даёт

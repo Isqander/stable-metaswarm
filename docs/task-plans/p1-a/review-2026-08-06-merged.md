@@ -885,6 +885,16 @@ C-34 снят решением Q56, а C-16 после Q54 стал downstream-
   резервируется до добавления строки;
 - закрыто 16 гейтов из 18; открыты только процессные C-15 и C-19.
 
+**Что изменила редакция 42** (adversarial-усиление C-29, 2026-08-10):
+
+- strict loader T1.7 отвергает direct и escaped lone Unicode surrogate внутри
+  marked payload с transport issue `invalid_unicode` до Pydantic/canonical
+  serializer, не меняя правила игнорирования внешнего noise;
+- event walker T1.2 проверяет UTF-8-кодируемость каждого key/value и возвращает
+  `EventPayloadError` до enqueue вместо утечки `UnicodeEncodeError`;
+- позитивный случай корректной escaped surrogate pair обязателен: parser
+  собирает её в один Unicode scalar, и грубый запрет всех `\ud*` недопустим.
+
 Качество планов при этом выше среднего, и переписывать пакет не нужно: §12.
 
 ---
@@ -915,7 +925,7 @@ C-34 снят решением Q56, а C-16 после Q54 стал downstream-
 | P1A-C22 | — | — | F-3 | S5 | MEDIUM | нет | Частично |
 | P1A-C23 | — | — | F-8 | — | MEDIUM | закрыт | Внесено (ред. 33) |
 | P1A-C28 | R16 | — | — | — | MEDIUM | закрыт | Внесено (ред. 41) |
-| P1A-C29 | R21 | — | — | — | MEDIUM | закрыт | Внесено (ред. 41) |
+| P1A-C29 | R21 | — | — | — | MEDIUM | закрыт | Внесено (ред. 41, усилено 42) |
 | P1A-C30 | R22 | — | — | — | MEDIUM | закрыт | Внесено (ред. 41) |
 | P1A-C34 | — | — | — | S10 | — | — | Снят (Q56 B) |
 | P1A-C35 | — | — | — | M6 | MEDIUM | нет | Подтверждено |
@@ -1828,6 +1838,15 @@ input. Tuple нормализуется в JSON array, поэтому контр
 equivalence; integer key, set/bytes/чужой object и cycle отвергаются, а не
 приводятся stdlib encoder'ом.
 
+**Усилено (ред. 42).** Тип `str` сам по себе недостаточен: lone surrogate,
+полученный из JSON escape, проходит `json.loads`/Pydantic, но не кодируется в
+UTF-8 при `ensure_ascii=false`. T1.7 теперь отклоняет direct и escaped lone
+surrogate внутри marked payload до model dispatch, но по-прежнему игнорирует
+его во внешнем noise; T1.2 проверяет каждую строку и ключ до enqueue. Обе
+границы возвращают свои типизированные ошибки. Корректная surrogate pair
+остаётся допустимой и отдельным позитивным тестом защищена от слишком широкого
+запрета.
+
 ### P1A-C30 · MEDIUM · гейт закрыт. Retry feedback был ограничен числом issues, но не размером
 
 **Источники:** 08-05 R22. T1.7 ограничивает диагностику 50 issues; общий
@@ -2212,9 +2231,11 @@ C-08, C-09, C-11, C-12, C-21, C-23, C-28, C-29 и C-30; остальные 2 о�
     **Внесено (ред. 33)**;
 15. C-28, C-29, C-30 — immutable result, рекурсивный JSON-тип и bounded feedback
     как публичные контракты (после начала реализации менять дороже).
-    **Внесено (ред. 41):** deep-frozen result и writer-barrier, recursive
+    **Внесено (ред. 41, C-29 усилен ред. 42):** deep-frozen result и
+    writer-barrier, recursive
     `JsonValue` с immutable event snapshot/JSON-equivalence, feedback ≤50 issues
-    и ≤16 KiB с hashed untrusted path; три гейта закрыты.
+    и ≤16 KiB с hashed untrusted path; surrogate boundaries типизированы, три
+    гейта закрыты.
 
 **Процессные:**
 
@@ -2311,7 +2332,8 @@ SQL-свидетельства были внесены раньше; тепер�
    membership-reuse reconciler'а. Остался отдельный процедурный
    **baseline-коммит пакета**, а не технический долг этих пяти находок.
 
-**C-28/C-29/C-30 закрыты редакцией 41.** Открыты ровно два гейта: C-15 и C-19 —
+**C-28/C-29/C-30 закрыты редакцией 41; C-29 adversarial-усилен редакцией 42.**
+Открыты ровно два гейта: C-15 и C-19 —
 процессные границы рубежей/baseline. DDL, repository boundary и публичные
 контракты валидатора в список гейтов больше не входят.
 
