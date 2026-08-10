@@ -211,6 +211,12 @@ def test_invalid_recursive_json_payload_is_rejected_before_insert(
         )
 
 
+@pytest.mark.parametrize("kind", ["invalid-\ud800.v1", "invalid-\udfff.v1"])
+def test_event_kind_rejects_lone_surrogate_as_payload_error(kind: str) -> None:
+    with pytest.raises(EventPayloadError, match="kind contains a Unicode surrogate"):
+        NewRunEvent(run_id=1, kind=kind, payload={}, created_at=1)
+
+
 def test_invalid_payload_inside_transaction_rolls_back_prior_state(tmp_path: Path) -> None:
     async def scenario() -> None:
         database = await Database.open(tmp_path / "state.sqlite3", core_version="test-core")

@@ -84,6 +84,7 @@ class NewRunEvent:
         branch_id: int | None = None,
         stage_id: int | None = None,
     ) -> None:
+        kind = _validate_string(kind, path="kind")
         if not isinstance(payload, Mapping):
             raise EventPayloadError("event payload must be a mapping")
         normalized = _normalize_json(payload, path="payload", active=set())
