@@ -57,6 +57,16 @@ baseline пока не зафиксированы. Перед T1.7b владел
   должен содержать trailers `Planning-Baseline` и `Implementation-Parent`.
   Проверка scope использует только диапазон между этим parent и closing commit,
   а не старый SHA паспорта плана или closing commit другой задачи.
+- От фиксации `Implementation-Parent` до closing commit линейный `main`
+  принадлежит только этой задаче: коммиты других задач в диапазон не
+  вклиниваются. Перед приёмкой запусти
+  `python3 scripts/checks/check-task-git-scope.py <closing SHA>` и отдельно
+  сопоставь файлы диапазона с границами плана; скрипт доказывает trailers,
+  резолвимость, ancestry и отсутствие merge, а inspection — принадлежность
+  коммитов задаче.
+- При передаче незавершённой implementation-задачи между сессиями оба SHA
+  записываются в именованный `implementation_scope` cut-off и одновременно в
+  его `referenced_shas`; роли не кодируются порядком списка или свободным текстом.
 
 ## Имена файлов в `docs/`
 

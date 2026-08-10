@@ -196,10 +196,18 @@ marker commit принятого пакета планов; его SHA цити�
 линейного `main` непосредственно перед первой её правкой, после приёмки всех
 предшественников. Closing commit задачи получает trailers
 `Planning-Baseline: <full SHA>` и `Implementation-Parent: <full SHA>`; если
-работа передаётся между сессиями, те же SHA повторяются в handoff. Scope
+работа передаётся между сессиями, те же SHA повторяются в именованном
+`implementation_scope` cut-off и в его `referenced_shas`. Scope
 проверяется только диапазоном `implementation_parent..closing_commit`. Поэтому
 уже принятые изменения независимых задач, находящиеся ниже в истории `main`, не
 попадают в diff текущей задачи и не требуют sibling-веток или merge range.
+От момента фиксации parent до closing commit `main` зарезервирован за одной
+задачей: коммиты другой задачи в этот интервал не принимаются. Перед review
+`python3 scripts/checks/check-task-git-scope.py <closing SHA>` проверяет оба
+trailers, full SHA, ancestry, достижимость из `main`, first-parent цепочку и
+отсутствие merge-коммитов; принадлежность каждого изменённого файла §3/§7
+остаётся явной inspection-проверкой. Если интервал нарушен, contaminated range
+не принимается как scope задачи и порядок работ возвращается на ревью.
 
 ---
 

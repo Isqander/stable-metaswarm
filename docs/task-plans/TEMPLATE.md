@@ -109,7 +109,7 @@
 |---|---|---|---|---|---|
 | `V-1` | `AC-1, INV-1` | `<test / lint / inspection>` | `.` | `["<команда>", "<аргумент>"]` | `<exit 0, конкретный вывод или состояние>` |
 | `V-2` | `AC-2, FAIL-1` | `<test / inspection>` | `.` | `["<команда>", "<аргумент>"]` | `<точно наблюдаемый результат>` |
-| `V-3` | `<scope AC/INV>` | `inspection` | `.` | Взять `implementation_parent..closing_commit` из trailers closing-коммита и сопоставить diff с §3/§7 | В diff только заявленные файлы и изменения этой задачи |
+| `V-3` | `<scope AC/INV>` | `inspection` | `.` | Запустить `python3 scripts/checks/check-task-git-scope.py <closing SHA>`, затем сопоставить `implementation_parent..closing_commit` с §3/§7 | Скрипт подтверждает оба full SHA, ancestry, линейный range без merge; в diff только заявленные файлы и изменения этой задачи |
 
 <!-- Для test/lint команда задаётся argv-массивом, без shell-синтаксиса. Для
 inspection вместо argv укажите точное ручное действие и свидетельство; ручная
@@ -175,8 +175,15 @@ Implementation-Parent: <full SHA перед первой правкой зада
 
 Все inspection-проверки scope используют только
 `implementation_parent..closing_commit`. Если работа переходит между сессиями,
-оба SHA до первой новой правки повторяются в `docs/handoff/`; exclusive
-sibling/merge ranges для линейного `main` не применяются.
+оба SHA до первой новой правки повторяются в именованном `implementation_scope`
+cut-off и его `referenced_shas`; exclusive sibling/merge ranges для линейного
+`main` не применяются.
+
+Между фиксацией implementation parent и closing commit `main` зарезервирован за
+этой задачей: коммиты других задач не вклиниваются. Скрипт
+`python3 scripts/checks/check-task-git-scope.py <closing SHA>` проверяет
+trailers, full SHA, ancestry, first-parent range и отсутствие merge; inspection
+из §10 отдельно доказывает, что все файлы range принадлежат текущей задаче.
 
 Если во время реализации меняются публичный контракт, владелец данных,
 транзакционная граница, зависимость между задачами или критерий приёмки,

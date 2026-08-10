@@ -674,18 +674,38 @@ Campaign/order/effective severity защищает база; принадлеж�
   "open_questions": [],
   "acceptance_criteria": ["Все fixture-пары воспроизводятся byte-for-byte."],
   "referenced_files": ["docs/design/vendor-cli-contracts.md"],
-  "referenced_shas": ["2761ee1307162e946b23363bb01dab697eaea6de"]
+  "referenced_shas": ["2761ee1307162e946b23363bb01dab697eaea6de"],
+  "implementation_scope": null
 }
 ```
 
 `task`, `current_state`, `next_action`, `touched_files` и
 `acceptance_criteria` обязательны и непусты. `open_questions` обязательно
 присутствует, но пустой массив честно означает «нет вопросов».
-`referenced_files`/`referenced_shas` — единственный машиночитаемый список
+`implementation_scope` также присутствует всегда: `null` для research/design и
+другой работы без принятого implementation range либо строгий frozen object
+ровно из двух полей для передачи реализации:
+
+```json
+{
+  "planning_baseline_sha": "<full SHA marker-коммита принятого пакета планов>",
+  "implementation_parent_sha": "<full SHA перед первой правкой задачи>"
+}
+```
+
+Оба значения задаёт caller через `CutoffContext`, а агент обязан вернуть их без
+изменения. Они входят в `referenced_shas` (одной строкой, если для первой задачи
+пакета SHA совпали); перестановка ролей, один отсутствующий SHA или расхождение с
+context — `contract_error`. Для non-implementation context object, наоборот,
+запрещён. Так nullable discriminator даёт форму «оба либо ни одного», а две
+независимые optional-строки не создают частичного состояния.
+
+`referenced_files`/`referenced_shas` — исчерпывающие машиночитаемые списки
 ссылок: свободный текст не разбирается эвристиками и не заменяет запись в этих
-полях. Валидатор сверяет каждый объявленный reference со snapshot репозитория,
-переданным caller'ом, а renderer строит кликабельные ссылки только из
-проверенного списка.
+полях. `implementation_scope` только назначает роли уже объявленным SHA и не
+может внести скрытую ссылку. Валидатор сверяет каждый reference со snapshot
+репозитория, переданным caller'ом, а renderer строит кликабельные ссылки только
+из проверенного списка.
 
 Проверяется структурно и кодом, без единого вызова модели:
 
@@ -695,6 +715,7 @@ Campaign/order/effective severity защищает база; принадлеж�
 | Критерии приёмки непусты | «Готово» без определения готовности |
 | Упомянутые файлы резолвятся на текущем SHA | Ссылки на несуществующее |
 | Упомянутые SHA существуют | То же |
+| Implementation context требует object из двух ожидаемых SHA; оба перечислены в `referenced_shas`; non-implementation context требует `null` | Потеря или перестановка planning baseline / implementation parent |
 | Есть digest содержимого | Целостность |
 
 Digest не сочиняет агент. После успешной валидации сервис канонически
@@ -840,7 +861,9 @@ allowlist · путь из denylist · адрес production-среды —
 
 **Граф:** дубль ID · висячее ребро · self-edge · цикл · дубль ребра.
 
-**Cut-off:** пустая обязательная секция · нерезолвимый файл или SHA.
+**Cut-off:** пустая обязательная секция · нерезолвимый файл или SHA · отсутствует,
+частично задана, переставлена либо не объявлена в `referenced_shas` пара
+implementation scope.
 
 **Вопрос человеку (`open_question`, других причин у этой схемы нет):** пустой
 `question_text` · duplicate key · пустой label · confidence вне `[0,1]`. Пустой
