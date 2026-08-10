@@ -109,7 +109,7 @@
 |---|---|---|---|---|---|
 | `V-1` | `AC-1, INV-1` | `<test / lint / inspection>` | `.` | `["<команда>", "<аргумент>"]` | `<exit 0, конкретный вывод или состояние>` |
 | `V-2` | `AC-2, FAIL-1` | `<test / inspection>` | `.` | `["<команда>", "<аргумент>"]` | `<точно наблюдаемый результат>` |
-| `V-3` | `<scope AC/INV>` | `inspection` | `.` | Запустить `python3 scripts/checks/check-task-git-scope.py <closing SHA>`, затем сопоставить `implementation_parent..closing_commit` с §3/§7 | Скрипт подтверждает оба full SHA, ancestry, линейный range без merge; в diff только заявленные файлы и изменения этой задачи |
+| `V-3` | `<scope AC/INV>` | `inspection` | `.` | Запустить `python3 scripts/checks/check-task-git-scope.py <closing SHA> --package <package ID>`, затем сопоставить `implementation_parent..closing_commit` с §3/§7 | Скрипт сверяет planning baseline с tracked-реестром, подтверждает оба full SHA, ancestry и линейный range без merge; в diff только заявленные файлы и изменения этой задачи |
 
 <!-- Для test/lint команда задаётся argv-массивом, без shell-синтаксиса. Для
 inspection вместо argv укажите точное ручное действие и свидетельство; ручная
@@ -160,7 +160,8 @@ inspection вместо argv укажите точное ручное дейст
 
 ## Git-границы реализации
 
-После принятия всего пакета создаётся один planning baseline marker commit. До
+После принятия всего пакета создаётся один planning baseline marker commit, а
+его полный SHA записывается в `docs/task-plans/planning-baselines.tsv`. До
 первой правки каждой задачи на чистом линейном `main` фиксируется текущий полный
 SHA — её `implementation parent`. Он не обязан совпадать ни со снимком паспорта,
 ни с closing commit прямого предшественника: между ними уже могут находиться
@@ -181,8 +182,9 @@ cut-off и его `referenced_shas`; exclusive sibling/merge ranges для ли�
 
 Между фиксацией implementation parent и closing commit `main` зарезервирован за
 этой задачей: коммиты других задач не вклиниваются. Скрипт
-`python3 scripts/checks/check-task-git-scope.py <closing SHA>` проверяет
-trailers, full SHA, ancestry, first-parent range и отсутствие merge; inspection
+`python3 scripts/checks/check-task-git-scope.py <closing SHA> --package <package ID>`
+сверяет planning baseline с tracked-реестром и проверяет trailers, full SHA,
+ancestry, first-parent range и отсутствие merge; inspection
 из §10 отдельно доказывает, что все файлы range принадлежат текущей задаче.
 
 Если во время реализации меняются публичный контракт, владелец данных,

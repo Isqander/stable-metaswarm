@@ -52,7 +52,8 @@ baseline пока не зафиксированы. Перед T1.7b владел
 - Сообщение коммита — по-русски, по существу: что изменилось и зачем, а не
   «update docs».
 - После принятия пакета планов его версия фиксируется отдельным planning
-  baseline marker commit. Перед первой правкой каждой задачи зафиксируй полный
+  baseline marker commit, а полный SHA записывается в
+  `docs/task-plans/planning-baselines.tsv`. Перед первой правкой каждой задачи зафиксируй полный
   SHA текущего чистого `main` как `Implementation-Parent`; closing commit задачи
   должен содержать trailers `Planning-Baseline` и `Implementation-Parent`.
   Проверка scope использует только диапазон между этим parent и closing commit,
@@ -60,7 +61,7 @@ baseline пока не зафиксированы. Перед T1.7b владел
 - От фиксации `Implementation-Parent` до closing commit линейный `main`
   принадлежит только этой задаче: коммиты других задач в диапазон не
   вклиниваются. Перед приёмкой запусти
-  `python3 scripts/checks/check-task-git-scope.py <closing SHA>` и отдельно
+  `python3 scripts/checks/check-task-git-scope.py <closing SHA> --package <package ID>` и отдельно
   сопоставь файлы диапазона с границами плана; скрипт доказывает trailers,
   резолвимость, ancestry и отсутствие merge, а inspection — принадлежность
   коммитов задаче.
