@@ -1,6 +1,6 @@
 # Схема состояния: SQLite
 
-**Текущий инвентарь после C-09/C-12:** **65 таблиц, 33 явных индекса,
+**Текущий инвентарь после усиления C-12:** **65 таблиц, 33 явных индекса,
 7 представлений и 47 триггеров**. Числа получены механическим подсчётом
 нормативных `CREATE`-операторов; 27 закрытых справочников не изменились.
 Исторические числа `61/24/6/6` относятся к шестой редакции; после неё вошли
@@ -49,17 +49,18 @@ active/open начальную форму, неизменяемость кажд
 terminal-переход попытки и круга и запрет UPDATE/DELETE evidence-строк.
 Пятый, `audit-lifecycle.sql`, — 50 сценариев на immutable content вопроса,
 append-only ответ, однократный reviewer decision и обходы через `INSERT OR
-REPLACE`. Шестой, `schema-constraints.sql`, — 30 сценариев C-21/C-23/C-09/C-12:
+REPLACE`. Шестой, `schema-constraints.sql`, — 39 сценариев C-21/C-23/C-09/C-12:
 минимум cap, duplicate override и его lifecycle, canonical event-order
 резолюций без локального `seq`, все blocker kinds и mixed precedence
-`run_state`. Седьмой, `task-graph-constraints.sql`, — 10 сценариев базовой половины
+`run_state`, а также шесть scope-координат blocker. Седьмой,
+`task-graph-constraints.sql`, — 10 сценариев базовой половины
 инварианта 23: semantic ID внутри импорта и среди активных версий, self-edge и
-дубль ребра. Всего в семи срезах 354 сценария; все
+дубль ребра. Всего в семи срезах 363 сценария; все
 воспроизводятся одной командой и падают ненулевым кодом при
 любом расхождении ожиданий:
 `python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
 можно передать несколько).
-Доказаны 190 мутационных случаев из 191 (случай может снимать несколько
+Доказаны 196 мутационных случаев из 197 (случай может снимать несколько
 перекрывающихся ключей сразу), один — признанный долг; манифест умеет держать и признанный долг
 (`todo: <причина>`), который считается недоказанным и виден в итоге отдельным
 числом.
@@ -67,7 +68,7 @@ REPLACE`. Шестой, `schema-constraints.sql`, — 30 сценариев C-21
 **Покрытие манифеста неполное, и это счётная величина, а не оценка.** Режим
 `mutation-check.py --coverage scripts/checks/mutations.tsv` перечисляет
 ограничения сценарных файлов, у которых нет ни одной строки манифеста: на
-2026-08-10 таких **41 из 158**. Дополнительно granular coverage по умолчанию
+2026-08-10 таких **41 из 164**. Дополнительно granular coverage по умолчанию
 считает каждый многосоставный trigger: все **55/55** верхнеуровневых ветвей
 `WHEN ... OR` и все **27/27** колонок `UPDATE OF` имеют отдельную мутацию и
 назначенный шаг. Строка на trigger целиком больше не выдаётся за доказательство
@@ -84,9 +85,12 @@ REPLACE`. Шестой, `schema-constraints.sql`, — 30 сценариев C-21
 присутствуют и совпадают дословно после снятия комментариев и пробелов. Для
 trigger parity источником служит `sqlite_master`, а не regex по исходному SQL:
 однострочная и многострочная запись равноправны; отдельный
-`--self-test-schema-sync` проверяет и совпадение, и лишний однострочный trigger.
-Для ограничений таблиц отчёт отдельно показывает **132 нормативных / 109 покрытых /
-23 без сценария**, 130 сценарных вхождений и 0 лишних. Все **12/12** явных
+`--self-test-schema-sync` проверяет и совпадение, и лишний однострочный trigger,
+и изменённое тело view. Для представлений parity даёт **7 нормативных / 3 в
+сценариях / 3 совпавших / 4 без сценария**; четыре отсутствующих закреплены
+поимённым debt-baseline. Для ограничений таблиц отчёт отдельно показывает
+**138 нормативных / 115 покрытых / 23 без сценария**, 136 сценарных вхождений
+и 0 лишних. Все **12/12** явных
 `UNIQUE INDEX` совпадают; обычные performance-индексы не считаются
 constraint-свидетелями. Поэтому отсутствующий во всех стабах объект либо
 `CHECK`/FK/UNIQUE тоже становится видимым. Диагностический режим возвращает
@@ -101,8 +105,9 @@ trigger-parity не выдаётся за полную parity схемы. Для
 родительские `UNIQUE (id, <scope>)` составных ключей — их снятие не ослабляет
 проверку, а ломает схему, и «назначенный шаг» для них ничего не значит.
 
-Все семь прогонов доказывают **констрейнты и cardinality** — какие строки база
-принимает, а какие нет. Атомарность «переход + событие», поведение при падении
+Все семь прогонов доказывают **констрейнты, cardinality и выбранную семантику
+views** — какие строки база принимает и как вычисляются проекции. Атомарность
+«переход + событие», поведение при падении
 между операциями и контракты самих операций ими не проверяются: там нужны
 транзакции и код. Владельцы этих тестов разные: транзакционная механика —
 T1.2, repository-примитивы (`reserve_reviewer_exposure()`) — T1.3, потребление
@@ -120,7 +125,8 @@ T1.2, repository-примитивы (`reserve_reviewer_exposure()`) — T1.3, п
 `python3 scripts/checks/run-sql-check.py --design-schema docs/design/db-schema.md`:
 inventory `65/33/7/47`, семь views читаются, `foreign_key_check` пуст, точный
 readback PRAGMA равен `wal/1/2/5000/0/1`, оба ограничения C-21/C-23 видны в
-`sqlite_master`. Отдельными
+`sqlite_master`, а C-09/C-12 дополнительно проверены телами и сценариями views.
+Отдельными
 негативными вставками проверены enum-FK, policy verdict и производные состояния
 `idle`/`cancelling`; после четвёртой редакции повторный полный прогон сохранил
 inventory `61/24/6/6`, а CHECK-и приняли согласованные пары
@@ -2844,7 +2850,8 @@ CREATE TABLE task (
   carry_over_of    INTEGER REFERENCES task(id),
   created_at       INTEGER NOT NULL,
   closed_at        INTEGER,
-  UNIQUE (import_id, semantic_task_id)
+  UNIQUE (import_id, semantic_task_id),
+  UNIQUE (id, run_id)                       -- под scope-FK blocker
 );
 
 -- Уникальность смыслового ID — среди АКТИВНЫХ версий задачи.
@@ -2905,6 +2912,14 @@ CREATE TABLE blocker (
   created_event_id INTEGER NOT NULL REFERENCES run_event(id),
   cleared_at   INTEGER,
   cleared_event_id INTEGER REFERENCES run_event(id),
+  -- `run_id` — несущий scope вычисляемого run_state и CLI. Любой заданный
+  -- target и оба audit-события обязаны принадлежать тому же прогону.
+  FOREIGN KEY (branch_id, run_id)        REFERENCES branch(id, run_id),
+  FOREIGN KEY (task_id, run_id)          REFERENCES task(id, run_id),
+  FOREIGN KEY (stage_id, run_id)         REFERENCES stage_execution(id, run_id),
+  FOREIGN KEY (question_id, run_id)      REFERENCES human_question(id, run_id),
+  FOREIGN KEY (created_event_id, run_id) REFERENCES run_event(id, run_id),
+  FOREIGN KEY (cleared_event_id, run_id) REFERENCES run_event(id, run_id),
   CHECK (kind <> 'human_question' OR question_id IS NOT NULL),
   CHECK ((cleared_at IS NULL) = (cleared_event_id IS NULL))
 );
@@ -2918,6 +2933,13 @@ CREATE INDEX ix_blocker_open ON blocker (run_id, kind) WHERE cleared_at IS NULL;
 транзакции `branch_id` и `question_id` обязательны, а `branch.state`
 переводится в `blocked`. Nullable `branch_id` сохраняется для вопросов уровня
 Run, но review-вопрос всегда branch-scoped.
+
+Одноколоночных ссылок недостаточно: без составных FK blocker прогона A мог
+указывать на ветку/задачу/стадию/вопрос или событие прогона B. После C-12 такая
+строка не только портила аудит, но и напрямую делала `run_state(A)=stalled` или
+`waiting_human`, оставляя B в `idle`. Parent keys `UNIQUE(id, run_id)` у branch
+и stage уже существовали; task, human_question и run_event получили их только
+ради этих FK. Nullable target не проверяется, а заданный обязан совпасть по run.
 
 Recovery проверяет связь в обе стороны до запуска планировщика:
 
@@ -2964,7 +2986,8 @@ CREATE TABLE run_event (
   branch_id  INTEGER REFERENCES branch(id),
   stage_id   INTEGER REFERENCES stage_execution(id),
   payload    TEXT    NOT NULL,            -- JSON, схема на kind
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  UNIQUE (id, run_id)                  -- под scope-FK blocker
 );
 
 CREATE INDEX ix_event_run ON run_event (run_id, id);
@@ -3075,6 +3098,7 @@ CREATE TABLE human_question (
   reask_count   INTEGER NOT NULL DEFAULT 0,
   UNIQUE (id, round_id),
   UNIQUE (id, reason),
+  UNIQUE (id, run_id),                         -- под scope-FK blocker
   FOREIGN KEY (campaign_id, round_id) REFERENCES review_round(campaign_id, id),
   -- Все координаты вопроса — из его прогона. Иначе вопрос показывается в
   -- одном прогоне, а ответ применяется к кампании другого.
@@ -3409,7 +3433,7 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 19 | Не более одной активной попытки на линию или шаг | **База** | Partial unique index `ux_attempt_active`; ключ — слот, поэтому заменённое и заменившее поколения не могут работать параллельно |
 | 20 | Один принятый ответ; `UNIQUE(transport, update_id)` | **База** | `UNIQUE(question_id)` в append-only `human_answer`; PK в `telegram_inbox`; `recursive_triggers=ON` не даёт `INSERT OR REPLACE` удалить прежний ответ |
 | 21 | FK между кампанией, кругом, замечанием, наблюдением, попыткой; `UNIQUE(campaign_id, finding_id, round_no)` | **База** | Составные FK §5.3.1 — связь с чужой кампанией, прогоном или стадией не вставляется; `entry_kind` FK и UNIQUE прямо в DDL |
-| 22 | Состояние `Run` вычисляется; human- и non-human blocker различены, branch blocker согласован с физическим состоянием ветки | **База + код** | `run_state` — представление с приоритетом terminal → cancelling → paused → running → waiting_human → stalled → idle; атомарная запись пары и три recovery-запроса §6.2 |
+| 22 | Состояние `Run` вычисляется; human- и non-human blocker различены, blocker не может сослаться на target/event чужого прогона, branch blocker согласован с физическим состоянием ветки | **База + код** | Шесть составных scope-FK; `run_state` — представление с приоритетом terminal → cancelling → paused → running → waiting_human → stalled → idle; атомарная запись пары и три recovery-запроса §6.2 |
 | 23 | Нет self-edge, дублей, циклов; смысловой ID уникален | **База + код** | CHECK и PK; `UNIQUE(import_id, semantic_task_id)` + партиальный индекс на активную версию; цикл — обход внутри той же транзакции |
 | 24 | Пустая готовность без блокировки = `invalid_graph` | **Код** | Запрос §9, выполняется планировщиком и recovery audit |
 | 25 | Запись в граф только атомарным импортом | **Код** | Единственный метод `task_graph.import_revision()`; прямых INSERT нет |
@@ -4086,7 +4110,10 @@ T1.2. Рядом закрыт соседний audit-шов: scope/reason/presen
 Доказательство тоже не opt-in: `mutation-check.py --coverage` требует отдельный
 свидетель каждой ветви многосоставного `WHEN` и каждой колонки многоколоночного
 `UPDATE OF`, а `--schema-sync` сверяет со стабами полный набор и тела
-нормативных trigger'ов и table-level `CHECK`/FK/`UNIQUE`. Для каждой полностью
+нормативных trigger'ов, views и table-level `CHECK`/FK/`UNIQUE`. Отсутствующие
+во всех сценариях нормативные views, как и constraints, держатся поимённым
+debt-baseline: изменение тела уже представленного view даёт `DIFF-VIEW`, а не
+остаётся зелёным под старой копией. Для каждой полностью
 append-only таблицы §1.5 обязательны оба пути — прямой DELETE и конфликтующий
 REPLACE.
 
@@ -4139,6 +4166,19 @@ running → waiting_human → stalled → idle делает активную с�
 главнее ожидания, а human blocker — главнее одновременного non-human. CLI читает
 отдельную подробную проекцию blocker'ов и показывает их количества по kind:
 агрегатный enum не теряет, чего именно ждёт система.
+
+**33. `blocker.run_id` согласован со всеми targets.** После уточнения 32
+`run_state` читает blocker напрямую по `run_id`, поэтому эта колонка стала
+несущей: строка прогона A с `branch_id` прогона B делала A `stalled`, B —
+`idle`, а оба recovery-запроса молчали, потому что соединялись только по target
+ID.
+
+Добавлены составные FK для nullable `branch_id`, `task_id`, `stage_id`,
+`question_id` и двух event IDs. У branch/stage parent key уже был; task,
+human_question и run_event получили `UNIQUE(id, run_id)` только ради новых FK.
+Шесть изолированных негативных сценариев снимаются шестью отдельными мутациями,
+а позитивный случай доказывает, что согласованный blocker влияет только на свой
+Run. Это усиливает C-12 без нового schema-объекта и без code-owned соглашения.
 
 ### Что было неверно в первой редакции этого документа
 

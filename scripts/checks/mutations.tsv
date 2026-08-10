@@ -12,6 +12,12 @@ scripts/checks/schema-constraints.sql	severity_override::UNIQUE (finding_id, eve
 scripts/checks/schema-constraints.sql	TRIGGER:trg_severity_override_immutable	16
 scripts/checks/schema-constraints.sql	TRIGGER:trg_severity_override_no_delete	18
 scripts/checks/schema-constraints.sql	finding_resolution::UNIQUE (finding_id, event_id)	24
+scripts/checks/schema-constraints.sql	blocker::FOREIGN KEY (branch_id, run_id) REFERENCES branch(id, run_id)	39
+scripts/checks/schema-constraints.sql	blocker::FOREIGN KEY (task_id, run_id) REFERENCES task(id, run_id)	40
+scripts/checks/schema-constraints.sql	blocker::FOREIGN KEY (stage_id, run_id) REFERENCES stage_execution(id, run_id)	41
+scripts/checks/schema-constraints.sql	blocker::FOREIGN KEY (question_id, run_id) REFERENCES human_question(id, run_id)	42
+scripts/checks/schema-constraints.sql	blocker::FOREIGN KEY (created_event_id, run_id) REFERENCES run_event(id, run_id)	43
+scripts/checks/schema-constraints.sql	blocker::FOREIGN KEY (cleared_event_id, run_id) REFERENCES run_event(id, run_id)	44
 
 # --- task-graph-constraints: базовая половина инварианта 23 ---
 scripts/checks/task-graph-constraints.sql	task::UNIQUE (import_id, semantic_task_id)	02

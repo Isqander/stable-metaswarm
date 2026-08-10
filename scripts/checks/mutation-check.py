@@ -26,10 +26,10 @@
 
 `--schema-sync` закрывает другую слепую зону: нормативного объекта может не
 быть ни в одном сценарном файле, и тогда обычному coverage нечего считать.
-Режим строит design и каждый стаб в SQLite, сверяет trigger'ы дословно, а
-table-level `CHECK`/FK/`UNIQUE` — как нормализованные элементы таблиц в обе
-стороны. Непокрытый нормативный constraint считается долгом и даёт ненулевой
-exit, даже если trigger-parity чистая.
+Режим строит design и каждый стаб в SQLite, сверяет trigger'ы и views дословно,
+а table-level `CHECK`/FK/`UNIQUE` — как нормализованные элементы таблиц в обе
+стороны. Непокрытый нормативный constraint/view считается долгом и даёт
+ненулевой exit, даже если trigger-parity чистая.
 
 Варианты `*-baseline` сравнивают известный долг с точным allow-list: подмножество
 проходит, любой новый ID падает даже при прежнем общем числе. Диагностические
@@ -79,6 +79,7 @@ from schema_utils import (
     explicit_indexes,
     table_ddl,
     trigger_ddls,
+    view_ddls,
 )
 
 RUNNER = Path(__file__).with_name("run-sql-check.py")
@@ -207,7 +208,11 @@ def strip_constraint_lines(sql: str, needle: str, table: str = None) -> str:
             skip_next = False
             continue
         skip_next = False
-        if needle in line:
+        # Адрес манифеста описывает SQL, а не выравнивание пробелами. Coverage
+        # уже сравнивает нормализованные constraints; применение мутации должно
+        # использовать ту же семантику, иначе доказанный FK может стать SKIP
+        # только из-за форматирования колонки REFERENCES.
+        if squash(needle) in squash(line):
             if "CHECK" in line:
                 # CHECK может занимать несколько строк: считаем скобки, пока
                 # выражение не закроется, и всё это заменяем на CHECK (1).
@@ -470,7 +475,8 @@ def normalized_trigger(block: str) -> str:
 
 def read_debt_baseline(path: str):
     allowed = {
-        "coverage_constraints", "schema_constraints", "schema_unique_indexes"
+        "coverage_constraints", "schema_constraints", "schema_unique_indexes",
+        "schema_views",
     }
     values = {metric: set() for metric in allowed}
     for line_no, raw in enumerate(io.open(path, encoding="utf-8"), 1):
@@ -514,7 +520,7 @@ def constraint_key(constraint) -> str:
 
 def run_schema_sync(design_path: str, scenario_dir: str,
                     debt_baseline=None) -> int:
-    """Сверить trigger'ы и table constraints design со стабами в обе стороны."""
+    """Сверить trigger/view/constraint design со стабами в обе стороны."""
     design = io.open(design_path, encoding="utf-8").read()
     scenarios = sorted(Path(scenario_dir).glob("*.sql"))
 
@@ -529,11 +535,13 @@ def run_schema_sync(design_path: str, scenario_dir: str,
         normative_tables = table_ddl(normative_con)
         normative_indexes = explicit_indexes(normative_con)
         normative_triggers = trigger_ddls(normative_con)
+        normative_views = view_ddls(normative_con)
         normative_con.close()
 
         scenario_tables = {}
         scenario_indexes = {}
         scenario_triggers = {}
+        scenario_views = {}
         for path in scenarios:
             source = io.open(path, encoding="utf-8").read()
             ddl = source.partition("-- === данные ===")[0]
@@ -543,6 +551,7 @@ def run_schema_sync(design_path: str, scenario_dir: str,
             scenario_tables[location] = table_ddl(con)
             scenario_indexes[location] = explicit_indexes(con)
             scenario_triggers[location] = trigger_ddls(con)
+            scenario_views[location] = view_ddls(con)
             con.close()
     except (sqlite3.Error, ValueError) as exc:
         print("BROKEN schema parity: %s: %s" % (type(exc).__name__, exc))
@@ -600,6 +609,74 @@ def run_schema_sync(design_path: str, scenario_dir: str,
     )
     trigger_bad = bool(
         missing or extra or different or duplicate_scenarios or trigger_conflicts
+    )
+
+    # View logic is executable contract just like a trigger body. C-09 and
+    # C-12 live in finding_status/run_state, so a copied scenario must not stay
+    # green after the normative view changes.
+    normative_view_bodies = {
+        name: normalized_trigger(block)
+        for name, block in normative_views.items()
+    }
+    actual_views = {}
+    view_locations = {}
+    duplicate_views = set()
+    view_conflicts = set()
+    for location, rows in scenario_views.items():
+        for name, block in rows.items():
+            normalized = normalized_trigger(block)
+            if name in actual_views:
+                duplicate_views.add(name)
+                if actual_views[name] != normalized:
+                    view_conflicts.add(name)
+            actual_views.setdefault(name, normalized)
+            view_locations.setdefault(name, []).append(location)
+
+    missing_views = sorted(set(normative_view_bodies) - set(actual_views))
+    extra_views = sorted(set(actual_views) - set(normative_view_bodies))
+    different_views = sorted(
+        name for name in set(normative_view_bodies) & set(actual_views)
+        if normative_view_bodies[name] != actual_views[name]
+    )
+    matched_views = (
+        len(set(normative_view_bodies) & set(actual_views)) - len(different_views)
+    )
+    if debt_baseline is None:
+        for name in missing_views:
+            print("MISSING-VIEW  %s" % name)
+    for name in extra_views:
+        print("EXTRA-VIEW    %s — %s" % (
+            name, ", ".join(view_locations[name])
+        ))
+    for name in different_views:
+        print("DIFF-VIEW     %s — %s" % (
+            name, ", ".join(view_locations[name])
+        ))
+    for name in sorted(duplicate_views):
+        print("DUPLICATE-VIEW %s — %s" % (
+            name, ", ".join(view_locations[name])
+        ))
+    for name in sorted(view_conflicts):
+        print("CONFLICT-VIEW %s — %s" % (
+            name, ", ".join(view_locations[name])
+        ))
+
+    print(
+        "views: нормативных %d / в сценариях %d / совпало %d / "
+        "без сценария %d / расходятся %d / лишних %d / дублей %d / "
+        "конфликтов %d"
+        % (
+            len(normative_view_bodies), len(actual_views), matched_views,
+            len(missing_views), len(different_views), len(extra_views),
+            len(duplicate_views), len(view_conflicts),
+        )
+    )
+    view_missing_bad = debt_regressed(
+        "schema_views", set(missing_views), debt_baseline
+    )
+    view_bad = bool(
+        view_missing_bad or extra_views or different_views
+        or duplicate_views or view_conflicts
     )
 
     # Trigger parity недостаточно: CHECK/FK/UNIQUE внутри CREATE TABLE могли
@@ -722,20 +799,22 @@ def run_schema_sync(design_path: str, scenario_dir: str,
     index_bad = bool(
         index_missing_bad or extra_indexes or different_indexes or index_conflicts
     )
-    return 1 if trigger_bad or constraint_bad or index_bad else 0
+    return 1 if trigger_bad or view_bad or constraint_bad or index_bad else 0
 
 
 def run_schema_sync_self_test() -> int:
-    """Регрессия: однострочный trigger виден и в parity, и как EXTRA."""
+    """Регрессия: однострочный trigger и view участвуют в parity."""
     design = """# schema-sync self-test
 
 ```sql
 CREATE TABLE sample (id INTEGER PRIMARY KEY);
 CREATE TRIGGER trg_one_line AFTER INSERT ON sample BEGIN SELECT 1; END;
+CREATE VIEW sample_view AS SELECT id FROM sample;
 ```
 """
     matching = """CREATE TABLE sample (id INTEGER PRIMARY KEY);
 CREATE TRIGGER trg_one_line AFTER INSERT ON sample BEGIN SELECT 1; END;
+CREATE VIEW sample_view AS SELECT id FROM sample;
 """
     extra = (
         matching
@@ -769,7 +848,21 @@ CREATE TRIGGER trg_one_line AFTER INSERT ON sample BEGIN SELECT 1; END;
             print(extra_output.getvalue())
             return 1
 
-    print("OK    schema-sync видит matching и лишний однострочный trigger")
+        mismatching = matching.replace(
+            "CREATE VIEW sample_view AS SELECT id FROM sample;",
+            "CREATE VIEW sample_view AS SELECT id + 1 AS id FROM sample;",
+        )
+        scenario_path.write_text(mismatching, encoding="utf-8")
+        mismatch_output = io.StringIO()
+        with redirect_stdout(mismatch_output):
+            mismatch_code = run_schema_sync(str(design_path), str(scenario_dir))
+        if mismatch_code != 1 or \
+                "DIFF-VIEW     sample_view" not in mismatch_output.getvalue():
+            print("FAIL  изменённое тело view не обнаружено как DIFF-VIEW")
+            print(mismatch_output.getvalue())
+            return 1
+
+    print("OK    schema-sync видит trigger и точное/изменённое тело view")
     return 0
 
 

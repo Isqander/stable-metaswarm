@@ -257,7 +257,8 @@ PRAGMA (все шесть), выделенный поток-писатель с 
 dispute-candidates и blocker details; шесть completeness reads. Представления
 `campaign_counters`, `finding_period`, `finding_severity` и `run_state`;
 последняя резолюция упорядочена только `run_event.id`, а Run различает
-`waiting_human` и `stalled`. CAS-завершение `step_attempt` и `review_round` с
+`waiting_human` и `stalled`; все заданные targets/events blocker принадлежат
+его `run_id`. CAS-завершение `step_attempt` и `review_round` с
 раздельными ошибками missing и already-terminal.
 
 **Готово, когда:** зелены тесты на все инварианты с пометкой **База** и на

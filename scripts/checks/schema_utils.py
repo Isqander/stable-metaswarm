@@ -98,3 +98,14 @@ def trigger_ddls(connection: sqlite3.Connection):
             "WHERE type='trigger' AND sql IS NOT NULL ORDER BY name"
         )
     }
+
+
+def view_ddls(connection: sqlite3.Connection):
+    """Именованные представления из реально собранной схемы."""
+    return {
+        row[0]: row[1]
+        for row in connection.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type='view' AND sql IS NOT NULL ORDER BY name"
+        )
+    }

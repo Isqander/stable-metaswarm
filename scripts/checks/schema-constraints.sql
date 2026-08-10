@@ -10,12 +10,6 @@
 
 PRAGMA foreign_keys = ON;
 
-CREATE TABLE stage_execution (
-  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-  max_author_revisions INTEGER NOT NULL,
-  CHECK (max_author_revisions >= 1)
-);
-
 CREATE TABLE run (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
   terminal_state      TEXT,
@@ -26,11 +20,34 @@ CREATE TABLE run (
 CREATE TABLE branch (
   id     INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id INTEGER NOT NULL,
-  state  TEXT NOT NULL
+  state  TEXT NOT NULL,
+  UNIQUE (id, run_id)
+);
+
+CREATE TABLE stage_execution (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id               INTEGER NOT NULL,
+  max_author_revisions INTEGER NOT NULL,
+  UNIQUE (id, run_id),
+  CHECK (max_author_revisions >= 1)
+);
+
+CREATE TABLE task (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  UNIQUE (id, run_id)
+);
+
+CREATE TABLE human_question (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  UNIQUE (id, run_id)
 );
 
 CREATE TABLE run_event (
-  id INTEGER PRIMARY KEY AUTOINCREMENT
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  UNIQUE (id, run_id)
 );
 
 CREATE TABLE finding (
@@ -55,10 +72,22 @@ CREATE TABLE finding_observation_link (
 );
 
 CREATE TABLE blocker (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id     INTEGER NOT NULL REFERENCES run(id),
-  kind       TEXT NOT NULL,
-  cleared_at INTEGER
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id           INTEGER NOT NULL REFERENCES run(id),
+  kind             TEXT NOT NULL,
+  branch_id        INTEGER,
+  task_id          INTEGER,
+  stage_id         INTEGER,
+  question_id      INTEGER,
+  created_event_id INTEGER NOT NULL,
+  cleared_at       INTEGER,
+  cleared_event_id INTEGER,
+  FOREIGN KEY (branch_id, run_id)        REFERENCES branch(id, run_id),
+  FOREIGN KEY (task_id, run_id)          REFERENCES task(id, run_id),
+  FOREIGN KEY (stage_id, run_id)         REFERENCES stage_execution(id, run_id),
+  FOREIGN KEY (question_id, run_id)      REFERENCES human_question(id, run_id),
+  FOREIGN KEY (created_event_id, run_id) REFERENCES run_event(id, run_id),
+  FOREIGN KEY (cleared_event_id, run_id) REFERENCES run_event(id, run_id)
 );
 
 CREATE TABLE severity_override (
@@ -131,23 +160,33 @@ FROM run r;
 
 -- === данные ===
 
+INSERT INTO run(id, terminal_state, cancel_requested_at, pause_requested_at) VALUES
+  (1, NULL, NULL, NULL),
+  (2, NULL, NULL, NULL),
+  (3, NULL, NULL, NULL),
+  (4, NULL, NULL, NULL),
+  (23, NULL, NULL, NULL),
+  (24, NULL, NULL, NULL);
+
 -- @step 01 C-21: минимальное разрешённое значение
 -- @expect ok
-INSERT INTO stage_execution(id, max_author_revisions) VALUES (1, 1);
+INSERT INTO stage_execution(id, run_id, max_author_revisions) VALUES (1, 1, 1);
 
 -- @step 02 C-21: штатное значение по умолчанию флоу
 -- @expect ok
-INSERT INTO stage_execution(id, max_author_revisions) VALUES (2, 3);
+INSERT INTO stage_execution(id, run_id, max_author_revisions) VALUES (2, 2, 3);
 
 -- @step 03 C-21: ноль не является режимом «без правок»
 -- @expect error CHECK
-INSERT INTO stage_execution(id, max_author_revisions) VALUES (3, 0);
+INSERT INTO stage_execution(id, run_id, max_author_revisions) VALUES (3, 3, 0);
 
 -- @step 04 C-21: отрицательный лимит также отвергается тем же CHECK
 -- @expect error CHECK
-INSERT INTO stage_execution(id, max_author_revisions) VALUES (4, -1);
+INSERT INTO stage_execution(id, run_id, max_author_revisions) VALUES (4, 4, -1);
 
-INSERT INTO run_event(id) VALUES (1), (10), (11), (20), (30), (35), (40);
+INSERT INTO run_event(id, run_id) VALUES
+  (1, 1), (10, 1), (11, 1), (20, 1), (30, 1), (35, 1), (40, 1),
+  (230, 23), (231, 23), (240, 24);
 INSERT INTO finding(id, event_id) VALUES (1, 1), (2, 10);
 
 -- @step 10 C-23: первый override finding'а в событии
@@ -270,19 +309,26 @@ INSERT INTO branch(id, run_id, state) VALUES
   (21, 21, 'blocked'),
   (22, 22, 'blocked');
 
-INSERT INTO blocker(id, run_id, kind, cleared_at) VALUES
-  (1, 12, 'human_question', NULL),
-  (2, 13, 'human_question', NULL),
-  (3, 14, 'awaiting_continue', NULL),
-  (4, 15, 'dependency', NULL),
-  (5, 16, 'invalid_graph', NULL),
-  (6, 16, 'human_question', NULL),
-  (7, 17, 'drift', NULL),
-  (8, 18, 'awaiting_continue', NULL),
-  (9, 19, 'dependency', NULL),
-  (10, 20, 'dependency', 200),
-  (11, 21, 'drift', NULL),
-  (12, 22, 'invalid_graph', NULL);
+INSERT INTO run_event(id, run_id) VALUES
+  (1012, 12), (1013, 13), (1014, 14), (1015, 15), (1016, 16),
+  (1017, 17), (1018, 18), (1019, 19), (1020, 20), (2020, 20),
+  (1021, 21), (1022, 22);
+
+INSERT INTO blocker(
+  id, run_id, kind, created_event_id, cleared_at, cleared_event_id
+) VALUES
+  (1, 12, 'human_question',    1012, NULL, NULL),
+  (2, 13, 'human_question',    1013, NULL, NULL),
+  (3, 14, 'awaiting_continue', 1014, NULL, NULL),
+  (4, 15, 'dependency',        1015, NULL, NULL),
+  (5, 16, 'invalid_graph',     1016, NULL, NULL),
+  (6, 16, 'human_question',    1016, NULL, NULL),
+  (7, 17, 'drift',             1017, NULL, NULL),
+  (8, 18, 'awaiting_continue', 1018, NULL, NULL),
+  (9, 19, 'dependency',        1019, NULL, NULL),
+  (10, 20, 'dependency',       1020, 200, 2020),
+  (11, 21, 'drift',            1021, NULL, NULL),
+  (12, 22, 'invalid_graph',    1022, NULL, NULL);
 
 -- @step 30 без активности и blocker'ов Run честно idle
 -- @expect rows-json [[10,"idle"]]
@@ -319,3 +365,56 @@ SELECT run_id, state FROM run_state WHERE run_id = 19;
 -- @step 38 очищенный blocker не превращает idle в stalled
 -- @expect rows-json [[20,"idle"]]
 SELECT run_id, state FROM run_state WHERE run_id = 20;
+
+-- === C-12: blocker target обязан принадлежать blocker.run_id ===
+
+INSERT INTO branch(id, run_id, state) VALUES (230, 23, 'blocked');
+INSERT INTO stage_execution(id, run_id, max_author_revisions) VALUES (230, 23, 1);
+INSERT INTO task(id, run_id) VALUES (230, 23);
+INSERT INTO human_question(id, run_id) VALUES (230, 23);
+
+-- @step 39 чужая ветка не делает run stalled
+-- @expect error FOREIGN KEY
+INSERT INTO blocker(id, run_id, kind, branch_id, created_event_id)
+VALUES (20, 24, 'dependency', 230, 240);
+
+-- @step 40 чужая задача не становится причиной run
+-- @expect error FOREIGN KEY
+INSERT INTO blocker(id, run_id, kind, task_id, created_event_id)
+VALUES (20, 24, 'dependency', 230, 240);
+
+-- @step 41 чужая стадия не становится причиной run
+-- @expect error FOREIGN KEY
+INSERT INTO blocker(id, run_id, kind, stage_id, created_event_id)
+VALUES (20, 24, 'dependency', 230, 240);
+
+-- @step 42 чужой вопрос не переводит run в waiting_human
+-- @expect error FOREIGN KEY
+INSERT INTO blocker(id, run_id, kind, question_id, created_event_id)
+VALUES (20, 24, 'human_question', 230, 240);
+
+-- @step 43 событие создания blocker — из того же run
+-- @expect error FOREIGN KEY
+INSERT INTO blocker(id, run_id, kind, created_event_id)
+VALUES (20, 24, 'dependency', 230);
+
+-- @step 44 событие снятия blocker — из того же run
+-- @expect error FOREIGN KEY
+INSERT INTO blocker(
+  id, run_id, kind, created_event_id, cleared_at, cleared_event_id
+) VALUES (20, 24, 'dependency', 240, 300, 231);
+
+-- @step 45 согласованный blocker со всеми targets записывается
+-- @expect ok
+INSERT INTO blocker(
+  id, run_id, kind, branch_id, task_id, stage_id, question_id,
+  created_event_id
+) VALUES (20, 23, 'dependency', 230, 230, 230, 230, 230);
+
+-- @step 46 blocker влияет только на свой run
+-- @expect rows-json [[23,"stalled"],[24,"idle"]]
+SELECT run_id, state FROM run_state WHERE run_id IN (23, 24) ORDER BY run_id;
+
+-- @step 47 все составные scope-FK целы
+-- @expect empty
+PRAGMA foreign_key_check;

@@ -2,6 +2,11 @@
 # baseline; любой новый ID — регрессия и ненулевой exit, даже если общее число
 # не выросло.
 
+schema_views	campaign_counters
+schema_views	finding_last_override
+schema_views	finding_period
+schema_views	finding_severity
+
 coverage_constraints	lane_assignment::FOREIGN KEY (lane_id, run_id) REFERENCES review_lane(id, run_id)
 coverage_constraints	lane_assignment::UNIQUE (lane_id, generation)
 coverage_constraints	review_campaign::CHECK ( (state IN ('closed_clean', 'closed_escalated', 'closed_cancelled')) = (closed_at IS NOT NULL) )
