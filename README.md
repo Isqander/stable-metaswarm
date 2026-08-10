@@ -9,10 +9,11 @@
 Название: методология [metaswarm](https://github.com/dsifry/metaswarm) плюс
 durable-рантайм под ней — её состояние сейчас живёт в контексте LLM, а не в коде.
 
-**Статус: тех-дизайн написан, production-кода ещё нет.** Фаза M0 закрыта:
-реальные vendor CLI проверены, сохранены fixtures и fake CLI для будущих тестов.
-Стек выбран, вопросы к требованиям закрыты, схема состояния и архитектура
-спроектированы. Что решено —
+**Статус: реализация начата.** Фаза M0 закрыта, пакет P1-A принят к реализации,
+создан минимальный устанавливаемый Python-пакет. Runtime-функций оркестратора
+пока нет. Реальные vendor CLI проверены, сохранены fixtures и fake CLI для
+будущих тестов. Стек выбран, вопросы к требованиям закрыты, схема состояния и
+архитектура спроектированы. Что решено —
 [`docs/metaResearches/decision.md`](docs/metaResearches/decision.md); как это
 устроено — [`docs/design/`](docs/design/).
 
@@ -42,6 +43,21 @@ Gas City, Conductor, Orca, bernstein и metaswarm — доноры кода и �
 ```powershell
 pwsh scripts/sync-refs.ps1            # всё
 pwsh scripts/sync-refs.ps1 -Tier 0,1  # только ядро
+```
+
+## Разработка
+
+Нужны Python 3.12+ и [uv](https://docs.astral.sh/uv/). Синхронизировать строго
+зафиксированное окружение:
+
+```sh
+uv sync --locked
+```
+
+Единая локальная проверка запускает pytest, затем Ruff:
+
+```sh
+./scripts/check.sh
 ```
 
 ## Язык

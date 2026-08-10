@@ -11,3 +11,11 @@
 # Python bytecode generated while validating executable fixtures.
 __pycache__/
 *.py[cod]
+
+# Local Python project state and build output.
+/.venv/
+/.pytest_cache/
+/.ruff_cache/
+*.egg-info/
+build/
+dist/
