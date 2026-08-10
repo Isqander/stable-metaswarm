@@ -242,12 +242,16 @@ Python-пакет в `src/metaswarm`, явный setuptools discovery, `pyprojec
 
 PRAGMA (все шесть), выделенный поток-писатель с очередью, `transaction()` как
 единственный способ записи, `run_event` append-only, миграция 0001 со схемой
-целиком.
+целиком. Event payload имеет рекурсивный `JsonValue`: только string-key
+mapping, JSON scalars и list/tuple arrays; до enqueue он копируется в immutable
+снимок, non-string key/cycle/unsupported object/non-finite отвергаются.
 
 **Готово, когда:** попытка записать вне транзакции падает; попытка обновить
 `run_event` падает на триггере; две конкурентные корутины не могут открыть
 вложенную транзакцию; миграция `0001` применяется к пустому файлу целиком и
-`PRAGMA foreign_key_check` не возвращает строк.
+`PRAGMA foreign_key_check` не возвращает строк. Nested payload проходит
+JSON-equivalent round-trip, tuple становится array, а integer key не
+превращается молча в строку.
 
 ### T1.3 · Схема: репозитории и представления · 3 д
 
@@ -353,13 +357,16 @@ T1.7 подтвердил допустимую пару: follow-up есть ли
 ### T1.7 · Контракты и валидатор · 2 д
 
 Разбор маркеров и строгого JSON до `1 MiB`, Pydantic-схемы восьми ответов,
-immutable validation contexts, включая обязательный массив `new_observations`
-в `review.decisions.v1`, и формирование сообщения об ошибке для повторной
-попытки. Это первая runtime-зависимость от Pydantic; `pyproject.toml` и
-`uv.lock` меняются вместе.
+глубоко immutable validated result/contexts, включая обязательный массив
+`new_observations` в `review.decisions.v1`, и формирование сообщения об ошибке
+для повторной попытки. Feedback ограничен 50 целыми issues и 16 KiB UTF-8;
+model-controlled path key заменяется SHA-256+length. Это первая
+runtime-зависимость от Pydantic; `pyproject.toml` и `uv.lock` меняются вместе.
 
-**Готово, когда:** каждая строка чек-листа `agent-contracts.md` §11 имеет тест с
-битым синтетическим marked output; отдельно проверено, что новый observation
+**Готово, когда:** каждый transport/schema-пункт чек-листа
+`agent-contracts.md` §11 имеет тест с битым синтетическим marked output, а
+post-validation boundary — отдельные result/feedback tests; отдельно проверено,
+что новый observation
 fix-check не принимает `finding_id`/`unchanged_from`, а пустой массив остаётся
 валидным. Follow-up observation внутри `decisions[*]` сохраняет внешний target
 и не попадает в адаптер T1.5; он допустим при `still_present`/`insists` и даёт
@@ -367,6 +374,9 @@ fix-check не принимает `finding_id`/`unchanged_from`, а пустой
 могут использовать этот direct path. T1.7 не читает checkout/store сам:
 существующие пути, scoped IDs, policy и reachable SHA приходят immutable
 snapshot-контекстом, а владельцы домена повторно держат несущие инварианты.
+Nested collections самого `ValidatedAgentResult` изменить нельзя, в том числе
+между enqueue и writer callback; byte-cap feedback проверяется огромным extra
+key и не режет строку либо Unicode code point.
 
 ### T1.7b · Вертикальный срез домена на реальной базе · 3 д
 

@@ -3005,6 +3005,22 @@ BEGIN
 END;
 ```
 
+`run_event.payload` принимает не произвольный Python object, а рекурсивный
+JSON-тип: `null`, `bool`, `int`, конечный `float`, `str`, массив таких значений
+или mapping только со строковыми ключами. На входе массива допустимы `list` и
+`tuple`; оба нормализуются в JSON array. Mapping с integer key, `set`, `bytes`,
+не-Mapping пользовательский object, цикл и `NaN`/`Infinity` отвергаются до
+INSERT. `NewRunEvent` рекурсивно копирует прошедший input в обычные временные
+`dict`/`list`, сразу сериализует их с sorted keys, compact separators,
+`ensure_ascii=false` и `allow_nan=false`, после чего хранит только готовую
+immutable JSON-строку. `append_run_event()` вставляет этот подготовленный снимок
+и не обращается повторно к input caller'а.
+
+Обещание round-trip формулируется как **JSON-equivalence**, а не Python
+equality: tuple закономерно читается обратно как list, но описывает тот же JSON
+array. Это также не позволяет stdlib `json` молча превратить integer key в
+строку и выдать преобразование за сохранение исходного payload.
+
 ### 6.4. Общий монотонный порядок событий
 
 `run_event.id` служит **общим монотонным порядком** для всей системы — на нём
