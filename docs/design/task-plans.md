@@ -251,11 +251,14 @@ PRAGMA (все шесть), выделенный поток-писатель с 
 
 ### T1.3 · Схема: репозитории и представления · 3 д
 
-Репозитории по агрегатам, представления `campaign_counters`, `finding_period`,
-`finding_severity`, `run_state`; typed reads current-round participants,
-незавершённых `issued` и открытых findings кампании без строки текущего круга;
-CAS-завершение `step_attempt` и `review_round` с раздельными ошибками missing и
-already-terminal.
+Пять concrete repositories с точным public API плана T1.3 §5.1: frozen DTO и
+сигнатуры для effective roster, raw reconciliation observations с lane index,
+рекурсивного scoped ledger с human-close context, current-round rows,
+dispute-candidates и blocker details; шесть completeness reads. Представления
+`campaign_counters`, `finding_period`, `finding_severity` и `run_state`;
+последняя резолюция упорядочена только `run_event.id`, а Run различает
+`waiting_human` и `stalled`. CAS-завершение `step_attempt` и `review_round` с
+раздельными ошибками missing и already-terminal.
 
 **Готово, когда:** зелены тесты на все инварианты с пометкой **База** и на
 базовую половину инвариантов **База + код** (`db-schema.md` §10). Каждый —
@@ -263,7 +266,10 @@ already-terminal.
 `closes_severity_period = 1` не
 вставляется; вторая связь на то же наблюдение не вставляется; вторая активная
 попытка на шаг не вставляется; активная кампания с заполненным `closed_at` и
-терминальная с `closed_at = NULL` не вставляются. Отдельная lifecycle-матрица
+терминальная с `closed_at = NULL` не вставляются. Public signatures/DTO
+совпадают с планом T1.3 §5.1; поздно вставленная резолюция со старым event ID не
+затмевает новую; каждый blocker kind и mixed precedence дают состояние Q52.
+Отдельная lifecycle-матрица
 доказывает attempt/round: обе строки рождаются active/open,
 input не меняется, terminal result записывается один раз, возврат в active и
 DELETE запрещены; все десять полностью append-only review-core таблиц §1.5,
@@ -641,8 +647,10 @@ owner.
 
 UDS-сервер, протокол команд, восемь команд, рендер дерева.
 
-**Готово, когда:** `ask` показывает ждущее человека отдельно от работающего и
-зависшего; `findings` показывает `escalation_severity` и `historical_max` рядом.
+**Готово, когда:** `ask` показывает `waiting_human` отдельно от `running` и
+`stalled`; рядом с агрегатом выводит количество открытых blocker'ов по kind и
+для каждой затронутой ветки — reason/detail и требуемое действие (ответить либо
+`continue`). `findings` показывает `escalation_severity` и `historical_max` рядом.
 Отчёт `possible_duplicate` Q54 показывает для нового finding объяснимые
 кандидаты того же subject среди открытых и недавно закрытых findings с
 устойчивой сортировкой и признаком усечения; совпавший диагностический

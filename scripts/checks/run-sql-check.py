@@ -274,18 +274,47 @@ def run_design_schema(path: str) -> int:
         override_sql = con.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='severity_override'"
         ).fetchone()[0]
+        resolution_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='finding_resolution'"
+        ).fetchone()[0]
+        status_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name='finding_status'"
+        ).fetchone()[0]
+        run_state_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name='run_state'"
+        ).fetchone()[0]
         normalized_stage = " ".join(stage_sql.split())
         normalized_override = " ".join(override_sql.split())
+        normalized_resolution = " ".join(resolution_sql.split())
+        normalized_status = " ".join(status_sql.split())
+        normalized_run_state = " ".join(run_state_sql.split())
         if "CHECK (max_author_revisions >= 1)" not in normalized_stage:
             print("FAIL  C-21 CHECK отсутствует в исполненной связной DDL")
             return 1
         if "UNIQUE (finding_id, event_id)" not in normalized_override:
             print("FAIL  C-23 UNIQUE отсутствует в исполненной связной DDL")
             return 1
+        resolution_columns = {
+            row[1] for row in con.execute("PRAGMA table_info('finding_resolution')")
+        }
+        if "seq" in resolution_columns or \
+                "UNIQUE (finding_id, event_id)" not in normalized_resolution:
+            print("FAIL  C-09 canonical event order отсутствует в связной DDL")
+            return 1
+        if "MAX(event_id)" not in normalized_status or "MAX(seq)" in normalized_status:
+            print("FAIL  C-09 finding_status использует неканонический порядок")
+            return 1
+        run_state_terms = (
+            "'waiting_human'", "'stalled'", "'idle'",
+            "'human_question'", "'awaiting_continue'",
+        )
+        if any(term not in normalized_run_state for term in run_state_terms):
+            print("FAIL  C-12 run_state не различает human/stalled/idle")
+            return 1
 
         print("OK    связная DDL: %d/%d/%d/%d" % actual)
         print("OK    %d views читаются; foreign_key_check пуст" % len(views))
-        print("OK    C-21 CHECK и C-23 UNIQUE присутствуют в sqlite_master")
+        print("OK    C-09/C-12/C-21/C-23 присутствуют в sqlite_master")
         print("OK    PRAGMA: %s" % (pragma_values,))
         return 0
     except Exception as exc:

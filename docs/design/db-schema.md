@@ -1,6 +1,6 @@
 # Схема состояния: SQLite
 
-**Текущий инвентарь после C-21/C-23:** **65 таблиц, 33 явных индекса,
+**Текущий инвентарь после C-09/C-12:** **65 таблиц, 33 явных индекса,
 7 представлений и 47 триггеров**. Числа получены механическим подсчётом
 нормативных `CREATE`-операторов; 27 закрытых справочников не изменились.
 Исторические числа `61/24/6/6` относятся к шестой редакции; после неё вошли
@@ -21,7 +21,8 @@ C-04: **+1 таблица** (`campaign_transition`), **+4 индекса**, **+8
 допуска и у резолюции профиля.
 Один lifecycle-заход C-07/C-08 добавил **+9 триггеров** для attempt/round и
 трёх evidence-таблиц; adversarial-проход — ещё **+8** для вопроса, ответа и
-`finding_round`; защита принятого `severity_override` — ещё **+2**. Остальные
+`finding_round`; защита принятого `severity_override` — ещё **+2**. C-09/C-12
+меняют одну колонку/UNIQUE и тела двух views, но не inventory. Остальные
 schema-effects того же свода (ограничения
 `max_author_revisions >= 1` и `UNIQUE(finding_id, event_id)`) внесены одним
 заходом; они не добавляют именованных schema-объектов и текущий inventory не
@@ -48,16 +49,17 @@ active/open начальную форму, неизменяемость кажд
 terminal-переход попытки и круга и запрет UPDATE/DELETE evidence-строк.
 Пятый, `audit-lifecycle.sql`, — 50 сценариев на immutable content вопроса,
 append-only ответ, однократный reviewer decision и обходы через `INSERT OR
-REPLACE`. Шестой, `schema-constraints.sql`, — 14 сценариев C-21/C-23: минимум
-cap, duplicate override, две ортогональные допустимые пары и полный lifecycle
-override. Седьмой, `task-graph-constraints.sql`, — 10 сценариев базовой половины
+REPLACE`. Шестой, `schema-constraints.sql`, — 30 сценариев C-21/C-23/C-09/C-12:
+минимум cap, duplicate override и его lifecycle, canonical event-order
+резолюций без локального `seq`, все blocker kinds и mixed precedence
+`run_state`. Седьмой, `task-graph-constraints.sql`, — 10 сценариев базовой половины
 инварианта 23: semantic ID внутри импорта и среди активных версий, self-edge и
-дубль ребра. Все семь
+дубль ребра. Всего в семи срезах 354 сценария; все
 воспроизводятся одной командой и падают ненулевым кодом при
 любом расхождении ожиданий:
 `python3 scripts/checks/run-sql-check.py scripts/checks/<файл>.sql` (файлов
 можно передать несколько).
-Доказаны 189 мутационных случаев из 190 (случай может снимать несколько
+Доказаны 190 мутационных случаев из 191 (случай может снимать несколько
 перекрывающихся ключей сразу), один — признанный долг; манифест умеет держать и признанный долг
 (`todo: <причина>`), который считается недоказанным и виден в итоге отдельным
 числом.
@@ -65,7 +67,7 @@ override. Седьмой, `task-graph-constraints.sql`, — 10 сценарие�
 **Покрытие манифеста неполное, и это счётная величина, а не оценка.** Режим
 `mutation-check.py --coverage scripts/checks/mutations.tsv` перечисляет
 ограничения сценарных файлов, у которых нет ни одной строки манифеста: на
-2026-08-09 таких **42 из 158**. Дополнительно granular coverage по умолчанию
+2026-08-10 таких **41 из 158**. Дополнительно granular coverage по умолчанию
 считает каждый многосоставный trigger: все **55/55** верхнеуровневых ветвей
 `WHEN ... OR` и все **27/27** колонок `UPDATE OF` имеют отдельную мутацию и
 назначенный шаг. Строка на trigger целиком больше не выдаётся за доказательство
@@ -84,7 +86,7 @@ trigger parity источником служит `sqlite_master`, а не regex 
 однострочная и многострочная запись равноправны; отдельный
 `--self-test-schema-sync` проверяет и совпадение, и лишний однострочный trigger.
 Для ограничений таблиц отчёт отдельно показывает **132 нормативных / 109 покрытых /
-23 без сценария**, 129 сценарных вхождений и 0 лишних. Все **12/12** явных
+23 без сценария**, 130 сценарных вхождений и 0 лишних. Все **12/12** явных
 `UNIQUE INDEX` совпадают; обычные performance-индексы не считаются
 constraint-свидетелями. Поэтому отсутствующий во всех стабах объект либо
 `CHECK`/FK/UNIQUE тоже становится видимым. Диагностический режим возвращает
@@ -2229,7 +2231,6 @@ CREATE TABLE finding_resolution (
   id                     INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id                 INTEGER NOT NULL REFERENCES run(id),
   finding_id             INTEGER NOT NULL REFERENCES finding(id),
-  seq                    INTEGER NOT NULL,
   resolution             TEXT    NOT NULL REFERENCES resolution_kind(resolution),
   resolution_authority   TEXT    NOT NULL REFERENCES resolution_authority(value),
   campaign_id            INTEGER NOT NULL REFERENCES review_campaign(id),
@@ -2238,7 +2239,9 @@ CREATE TABLE finding_resolution (
   closes_severity_period INTEGER NOT NULL,
   event_id               INTEGER NOT NULL REFERENCES run_event(id),
   created_at             INTEGER NOT NULL,
-  UNIQUE (finding_id, seq),
+  -- run_event.id — единственный порядок изменений finding. Две резолюции
+  -- одного finding в одном событии означали бы два взаимоисключающих статуса.
+  UNIQUE (finding_id, event_id),
   -- Круг закрытия — из той же кампании; при round_no IS NULL (закрытие
   -- решением человека вне круга) составной FK не проверяется, и это верно.
   FOREIGN KEY (campaign_id, round_no)
@@ -2388,8 +2391,8 @@ SELECT f.id AS finding_id,
   LEFT JOIN (
       SELECT r.finding_id, r.event_id AS ev, r.resolution, r.resolution_authority
         FROM finding_resolution r
-       WHERE r.seq = (SELECT MAX(seq) FROM finding_resolution
-                       WHERE finding_id = r.finding_id)
+       WHERE r.event_id = (SELECT MAX(event_id) FROM finding_resolution
+                            WHERE finding_id = r.finding_id)
   ) last_res ON last_res.finding_id = f.id
   LEFT JOIN (
       SELECT finding_id, MAX(ev) AS ev FROM (
@@ -2400,6 +2403,14 @@ SELECT f.id AS finding_id,
       ) GROUP BY finding_id
   ) last_open ON last_open.finding_id = f.id;
 ```
+
+`finding_resolution` намеренно не имеет собственного `seq`: и последняя
+резолюция, и граница severity-периода упорядочены одним каноническим
+`run_event.id`. Caller передаёт уже созданный в той же writer-транзакции
+`event_id`; repository не вычисляет второй локальный счётчик. Поздно вставленная
+историческая строка с меньшим `event_id` не может затмить фактически более
+позднее решение, а `UNIQUE (finding_id, event_id)` не допускает двух решений
+одного finding в одном событии.
 
 Здесь **любое** закрытие считается закрытием, включая `accepted_reason` и
 `policy_closed`, а открывающим считается последнее по времени открытие. Отсюда:
@@ -2996,18 +3007,34 @@ SELECT r.id AS run_id,
                   WHERE b.run_id = r.id
                     AND b.state IN ('ready','running','retry_wait'))
                                                    THEN 'running'
-    WHEN EXISTS (SELECT 1 FROM branch b
-                  WHERE b.run_id = r.id AND b.state = 'blocked')
-                                                   THEN 'waiting_human'
+    WHEN EXISTS (
+           SELECT 1 FROM blocker bl
+            WHERE bl.run_id = r.id
+              AND bl.cleared_at IS NULL
+              AND bl.kind IN ('human_question', 'awaiting_continue')
+         )                                         THEN 'waiting_human'
+    WHEN EXISTS (
+           SELECT 1 FROM blocker bl
+            WHERE bl.run_id = r.id
+              AND bl.cleared_at IS NULL
+         )
+                                                   THEN 'stalled'
     ELSE 'idle'
   END AS state
 FROM run r;
 ```
 
-`idle` теперь явно записан в перечне `decision.md`, но не является штатным
-терминалом: это честное имя для положения «активных веток нет, блокировок нет,
-терминала нет». Оно означает ошибку планировщика и должно быть видно, а не
-маскироваться под `waiting_human`. `cancelling` столь же производен: запрос на
+`waiting_human` означает ровно открытый `human_question` или
+`awaiting_continue`; вид блокировки, а не само `branch.state='blocked'`, задаёт
+семантику агрегата. Любой иной открытый blocker даёт `stalled`. При смешении
+видов human-состояние выше `stalled`, а любая активная соседняя ветка выше обоих:
+Run остаётся `running`. Детали и количества blocker'ов читает CLI отдельной
+проекцией — агрегат не пытается кодировать их в одном enum.
+
+`idle` явно записан в перечне `decision.md`, но не является штатным терминалом:
+это честное имя для положения «активных веток нет, блокировок нет, терминала
+нет». Оно означает ошибку планировщика и должно быть видно, а не маскироваться
+под `waiting_human` или `stalled`. `cancelling` столь же производен: запрос на
 отмену уже durable, но не все ветки приведены к терминалу. Ровно тот же принцип,
 что у `invalid_graph`: переходное или ошибочное положение показывается, а не
 замалчивается.
@@ -3382,7 +3409,7 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | 19 | Не более одной активной попытки на линию или шаг | **База** | Partial unique index `ux_attempt_active`; ключ — слот, поэтому заменённое и заменившее поколения не могут работать параллельно |
 | 20 | Один принятый ответ; `UNIQUE(transport, update_id)` | **База** | `UNIQUE(question_id)` в append-only `human_answer`; PK в `telegram_inbox`; `recursive_triggers=ON` не даёт `INSERT OR REPLACE` удалить прежний ответ |
 | 21 | FK между кампанией, кругом, замечанием, наблюдением, попыткой; `UNIQUE(campaign_id, finding_id, round_no)` | **База** | Составные FK §5.3.1 — связь с чужой кампанией, прогоном или стадией не вставляется; `entry_kind` FK и UNIQUE прямо в DDL |
-| 22 | Состояние `Run` вычисляется; branch blocker согласован с физическим состоянием ветки | **База + код** | `run_state` — представление; атомарная запись пары и три recovery-запроса §6.2 |
+| 22 | Состояние `Run` вычисляется; human- и non-human blocker различены, branch blocker согласован с физическим состоянием ветки | **База + код** | `run_state` — представление с приоритетом terminal → cancelling → paused → running → waiting_human → stalled → idle; атомарная запись пары и три recovery-запроса §6.2 |
 | 23 | Нет self-edge, дублей, циклов; смысловой ID уникален | **База + код** | CHECK и PK; `UNIQUE(import_id, semantic_task_id)` + партиальный индекс на активную версию; цикл — обход внутри той же транзакции |
 | 24 | Пустая готовность без блокировки = `invalid_graph` | **Код** | Запрос §9, выполняется планировщиком и recovery audit |
 | 25 | Запись в граф только атомарным импортом | **Код** | Единственный метод `task_graph.import_revision()`; прямых INSERT нет |
@@ -4086,6 +4113,32 @@ Reconciler получает плоский список raw observations, вид
 сам явно перечисляет semantic group. Обязательный контрпример проводит две
 строки с одинаковыми шестью полями и разными evidence через весь вход без
 склейки.
+
+**31. У резолюции не должно быть второго порядка.** Первая схема одновременно
+упорядочивала статус по `finding_resolution.seq`, а severity-период — по
+`run_event.id`. UNIQUE делал локальный seq неповторимым, но не связывал его с
+реальным порядком: физически поздняя вставка с меньшим seq могла затмить более
+позднее событие только в одном из двух views.
+
+Локальный `seq` удалён. `finding_status` и `finding_period` теперь оба выбирают
+границы по единственному общему порядку `run_event.id`; одна пара
+`(finding_id, event_id)` уникальна. Writer сначала создаёт событие и передаёт
+его ID в resolution внутри той же транзакции — второго allocator и соглашения
+«max+1» больше нет. Исполняемый контрпример вставляет событие 40, затем
+историческое 35 и проверяет, что последней остаётся резолюция 40.
+
+**32. Blocked не означает waiting_human.** Виды blocker'ов изначально включали
+`dependency`, `drift` и `invalid_graph`, но view выводил `waiting_human` из
+одного `branch.state='blocked'`. Из-за этого собственная неисправность системы
+показывалась как действие, которого ждут от человека.
+
+По решению Q52 human-предикат — открытый `human_question` либо
+`awaiting_continue`; любой иной открытый blocker даёт `stalled`, а отсутствие
+активности и blocker'ов — `idle`. Приоритет terminal → cancelling → paused →
+running → waiting_human → stalled → idle делает активную соседнюю ветку
+главнее ожидания, а human blocker — главнее одновременного non-human. CLI читает
+отдельную подробную проекцию blocker'ов и показывает их количества по kind:
+агрегатный enum не теряет, чего именно ждёт система.
 
 ### Что было неверно в первой редакции этого документа
 

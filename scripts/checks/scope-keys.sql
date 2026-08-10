@@ -13,6 +13,7 @@
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE run (id INTEGER PRIMARY KEY AUTOINCREMENT);
+CREATE TABLE run_event (id INTEGER PRIMARY KEY AUTOINCREMENT);
 CREATE TABLE attempt_role (role TEXT PRIMARY KEY);
 CREATE TABLE attempt_outcome (outcome TEXT PRIMARY KEY);
 CREATE TABLE review_round_kind (kind TEXT PRIMARY KEY);
@@ -215,10 +216,10 @@ CREATE TABLE finding_resolution (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id      INTEGER NOT NULL REFERENCES run(id),
   finding_id  INTEGER NOT NULL REFERENCES finding(id),
-  seq         INTEGER NOT NULL,
   campaign_id INTEGER NOT NULL REFERENCES review_campaign(id),
   round_no    INTEGER,
-  UNIQUE (finding_id, seq),
+  event_id    INTEGER NOT NULL REFERENCES run_event(id),
+  UNIQUE (finding_id, event_id),
   FOREIGN KEY (campaign_id, round_no) REFERENCES review_round(campaign_id, round_no),
   FOREIGN KEY (finding_id, run_id)    REFERENCES finding(id, run_id),
   FOREIGN KEY (campaign_id, run_id)   REFERENCES review_campaign(id, run_id)
@@ -374,6 +375,7 @@ INSERT INTO question_reason(reason) VALUES
   ('reconcile_failed'),('reopen_human_closed'),('dispute');
 INSERT INTO run DEFAULT VALUES;                        -- 1
 INSERT INTO run DEFAULT VALUES;                        -- 2
+INSERT INTO run_event(id) VALUES (1), (2);
 INSERT INTO branch(id, run_id) VALUES (1, 1), (2, 2);
 INSERT INTO stage_execution(id, run_id, branch_id) VALUES (1, 1, 1), (2, 2, 2);
 INSERT INTO review_subject(id, run_id, revision) VALUES (1, 1, 'sha-1'), (2, 2, 'sha-2');
@@ -558,13 +560,13 @@ VALUES (6, 1, 1, 5, 1, 1, 1, 1);
 
 -- @step 25 закрытие своего finding
 -- @expect ok
-INSERT INTO finding_resolution(id, run_id, finding_id, seq, campaign_id, round_no)
+INSERT INTO finding_resolution(id, run_id, finding_id, campaign_id, round_no, event_id)
 VALUES (1, 1, 1, 1, 1, 1);
 
 -- @step 26 закрытие finding другого прогона
 -- @expect error FOREIGN KEY
-INSERT INTO finding_resolution(id, run_id, finding_id, seq, campaign_id, round_no)
-VALUES (2, 1, 5, 1, 1, 1);
+INSERT INTO finding_resolution(id, run_id, finding_id, campaign_id, round_no, event_id)
+VALUES (2, 1, 5, 1, 1, 2);
 
 -- === связь ===
 

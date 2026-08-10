@@ -6,11 +6,12 @@
 # «TRIGGER:<имя>» | «<фрагмент>».
 # Адресация по таблице обязательна там, где фрагмент встречается не один раз.
 
-# --- schema-constraints: C-21/C-23 ---
+# --- schema-constraints: C-21/C-23/C-09/C-12 ---
 scripts/checks/schema-constraints.sql	stage_execution::CHECK (max_author_revisions >= 1)	03
 scripts/checks/schema-constraints.sql	severity_override::UNIQUE (finding_id, event_id)	11
 scripts/checks/schema-constraints.sql	TRIGGER:trg_severity_override_immutable	16
 scripts/checks/schema-constraints.sql	TRIGGER:trg_severity_override_no_delete	18
+scripts/checks/schema-constraints.sql	finding_resolution::UNIQUE (finding_id, event_id)	24
 
 # --- task-graph-constraints: базовая половина инварианта 23 ---
 scripts/checks/task-graph-constraints.sql	task::UNIQUE (import_id, semantic_task_id)	02
