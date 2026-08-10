@@ -51,6 +51,12 @@ baseline пока не зафиксированы. Перед T1.7b владел
   разрешение. Ветка `main`, remote `origin`.
 - Сообщение коммита — по-русски, по существу: что изменилось и зачем, а не
   «update docs».
+- После принятия пакета планов его версия фиксируется отдельным planning
+  baseline marker commit. Перед первой правкой каждой задачи зафиксируй полный
+  SHA текущего чистого `main` как `Implementation-Parent`; closing commit задачи
+  должен содержать trailers `Planning-Baseline` и `Implementation-Parent`.
+  Проверка scope использует только диапазон между этим parent и closing commit,
+  а не старый SHA паспорта плана или closing commit другой задачи.
 
 ## Имена файлов в `docs/`
 
