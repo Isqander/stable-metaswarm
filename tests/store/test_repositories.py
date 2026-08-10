@@ -11,6 +11,7 @@ import pytest
 from metaswarm.store import (
     NewRunEvent,
     RepositoryAlreadyTerminal,
+    RepositoryPreconditionFailed,
     RepositoryRecordNotFound,
     ReviewerExposureConflict,
     Transaction,
@@ -27,7 +28,9 @@ from metaswarm.store.repo import (
     NewFindingRound,
     NewHumanQuestion,
     NewLaneAssignment,
+    NewNotificationOutbox,
     NewObservationLink,
+    NewReviewCampaign,
     NewReviewLane,
     NewReviewObservation,
     NewReviewRound,
@@ -148,6 +151,299 @@ def test_public_repository_surface_is_the_frozen_t1_3_api() -> None:
         ]
 
 
+@pytest.mark.parametrize(
+    ("repository_type", "method_name"),
+    (
+        (RunRepository, "get_run"),
+        (RunRepository, "get_branch"),
+        (RunRepository, "get_stage"),
+        (CampaignRepository, "get_campaign"),
+        (CampaignRepository, "get_round"),
+        (QuestionRepository, "get_question"),
+    ),
+    ids=lambda value: value if isinstance(value, str) else value.__name__,
+)
+def test_all_optional_getters_return_none_for_an_unknown_id(
+    repository_type: type[object],
+    method_name: str,
+    database_factory: Callable[[], Awaitable],
+) -> None:
+    async def scenario() -> None:
+        database = await database_factory()
+        try:
+            repository = repository_type()
+            assert await database.read(
+                lambda db: getattr(repository, method_name)(db, 404)
+            ) is None
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
+def test_named_state_mutations_return_records_and_enforce_expected_state(
+    database_factory: Callable[[], Awaitable],
+    review_graph_builder: Callable[..., object],
+) -> None:
+    async def scenario() -> None:
+        database = await database_factory()
+        runs = RunRepository()
+        campaigns = CampaignRepository()
+        try:
+            graph = await database.transaction(review_graph_builder)
+            branch = await database.transaction(
+                lambda tx: runs.set_branch_state(tx, graph.branch_id, "running", "blocked")
+            )
+            assert branch.state == "blocked"
+            with pytest.raises(RepositoryPreconditionFailed):
+                await database.transaction(
+                    lambda tx: runs.set_branch_state(tx, graph.branch_id, "running", "ready")
+                )
+            campaign = await database.transaction(
+                lambda tx: campaigns.transition_campaign_state(
+                    tx, graph.campaign_id, "discovery", "reconciliation", None
+                )
+            )
+            assert campaign.state == "reconciliation"
+            with pytest.raises(RepositoryPreconditionFailed):
+                await database.transaction(
+                    lambda tx: campaigns.transition_campaign_state(
+                        tx, graph.campaign_id, "discovery", "fix_cycle", None
+                    )
+                )
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
+def test_fix_check_skips_lane_gates_and_rejects_replacement_and_waiver_in_repository(
+    database_factory: Callable[[], Awaitable],
+    review_graph_builder: Callable[..., object],
+) -> None:
+    async def scenario() -> None:
+        database = await database_factory()
+        campaigns = CampaignRepository()
+        findings = FindingRepository()
+        try:
+            graph = await database.transaction(
+                lambda tx: review_graph_builder(
+                    tx, suffix="fix-check", round_kind="fix_check", attempt_outcome="failed"
+                )
+            )
+            lane_results = await database.read(
+                lambda db: (
+                    campaigns.find_missing_discovery_lane_participation(db, graph.round_id),
+                    campaigns.find_discovery_without_successful_opinion(db, graph.round_id),
+                    campaigns.find_discovery_roster_cardinality_mismatch(db, graph.round_id),
+                )
+            )
+            assert lane_results == ((), (), ())
+            assert await database.read(
+                lambda db: findings.read_dispute_candidates(db, graph.round_id)
+            ) == ()
+            with pytest.raises(RepositoryPreconditionFailed, match="open discovery"):
+                await database.transaction(
+                    lambda tx: campaigns.replace_lane_assignment(
+                        tx,
+                        graph.round_id,
+                        graph.lane_id,
+                        404,
+                        "reviewer-fix-check",
+                        graph.event_id,
+                        100,
+                    )
+                )
+            with pytest.raises(RepositoryPreconditionFailed, match="open discovery"):
+                await database.transaction(
+                    lambda tx: campaigns.waive_lane_for_round(
+                        tx,
+                        graph.round_id,
+                        graph.lane_id,
+                        404,
+                        graph.event_id,
+                        100,
+                    )
+                )
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
+def test_foreign_finding_run_is_rejected_by_writer_and_reported_by_recovery_read(
+    database_factory: Callable[[], Awaitable],
+    review_graph_builder: Callable[..., object],
+) -> None:
+    async def scenario() -> None:
+        database = await database_factory()
+        attempts = AttemptRepository()
+        findings = FindingRepository()
+        try:
+            graph = await database.transaction(
+                lambda tx: review_graph_builder(tx, suffix="link-a")
+            )
+            other = await database.transaction(
+                lambda tx: review_graph_builder(tx, suffix="link-b")
+            )
+
+            def seed(tx: Transaction) -> tuple[int, int, int, int]:
+                observation = findings.create_observation(
+                    tx,
+                    NewReviewObservation(
+                        graph.campaign_id,
+                        graph.round_id,
+                        graph.lane_id,
+                        graph.attempt_id,
+                        graph.subject_id,
+                        "rev-1",
+                        "local observation",
+                        "body",
+                        None,
+                        None,
+                        None,
+                        None,
+                        "medium",
+                        None,
+                        "medium",
+                        "foreign-link-local",
+                        100,
+                    ),
+                )
+                other_observation = findings.create_observation(
+                    tx,
+                    NewReviewObservation(
+                        other.campaign_id,
+                        other.round_id,
+                        other.lane_id,
+                        other.attempt_id,
+                        other.subject_id,
+                        "rev-1",
+                        "foreign finding",
+                        "body",
+                        None,
+                        None,
+                        None,
+                        None,
+                        "medium",
+                        None,
+                        "medium",
+                        "foreign-link-other",
+                        100,
+                    ),
+                )
+                other_event = append_run_event(
+                    tx,
+                    NewRunEvent(
+                        run_id=other.run_id,
+                        kind="foreign_finding.v1",
+                        payload={},
+                        created_at=101,
+                    ),
+                )
+                foreign_finding = findings.create_finding(
+                    tx,
+                    NewFinding(
+                        other.run_id,
+                        other.subject_id,
+                        other.campaign_id,
+                        other.round_id,
+                        other_observation.id,
+                        "rev-1",
+                        other.lane_id,
+                        "foreign finding",
+                        other_event,
+                        101,
+                    ),
+                )
+                reconciler = attempts.create_attempt(
+                    tx,
+                    NewStepAttempt(
+                        "A-link-reconciler",
+                        graph.run_id,
+                        graph.stage_id,
+                        "reconciler",
+                        graph.campaign_id,
+                        graph.round_id,
+                        None,
+                        None,
+                        "rev-1",
+                        None,
+                        "reviewer-link-a",
+                        "gpt-test",
+                        "reconcile.v1",
+                        "foreign-link",
+                        None,
+                        None,
+                        None,
+                        "[]",
+                        "{}",
+                        102,
+                    ),
+                )
+                reconciler = attempts.complete_attempt(
+                    tx,
+                    reconciler.id,
+                    AttemptCompletion("succeeded", None, "gpt-test", "out", 103, None, None),
+                )
+                local_event = append_run_event(
+                    tx,
+                    NewRunEvent(
+                        run_id=graph.run_id,
+                        kind="foreign_link.v1",
+                        payload={},
+                        created_at=103,
+                    ),
+                )
+                return observation.id, foreign_finding.id, reconciler.id, local_event
+
+            observation_id, finding_id, reconciler_id, event_id = await database.transaction(
+                seed
+            )
+            value = NewObservationLink(
+                observation_id,
+                graph.campaign_id,
+                graph.round_id,
+                finding_id,
+                "first_seen",
+                reconciler_id,
+                "reconciler",
+                "succeeded",
+                None,
+                None,
+                event_id,
+                103,
+            )
+            with pytest.raises(RepositoryPreconditionFailed, match="different runs"):
+                await database.transaction(
+                    lambda tx: findings.create_observation_link(tx, value)
+                )
+
+            await database.transaction(
+                lambda tx: tx.execute(
+                    "INSERT INTO finding_observation_link(observation_id,campaign_id,round_id,"
+                    "finding_id,link_type,decided_by_attempt_id,decided_by_role,"
+                    "decided_by_outcome,decided_by_human_answer_id,reason,event_id,created_at) "
+                    "VALUES (?,?,?,?,'first_seen',?,'reconciler','succeeded',NULL,NULL,?,103)",
+                    (
+                        observation_id,
+                        graph.campaign_id,
+                        graph.round_id,
+                        finding_id,
+                        reconciler_id,
+                        event_id,
+                    ),
+                )
+            )
+            assert await database.read(
+                lambda db: findings.find_links_with_foreign_finding_run(db, graph.run_id)
+            ) == (observation_id,)
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
 def test_attempt_and_round_cas_distinguish_missing_and_terminal(
     database_factory: Callable[[], Awaitable],
     review_graph_builder: Callable[..., object],
@@ -235,6 +531,22 @@ def test_lane_failure_replacement_and_waiver_are_discovery_only_audit_effects(
                         asked_at=20,
                     ),
                 )
+                outbox = questions.create_outbox_message(
+                    tx,
+                    NewNotificationOutbox(
+                        run_id=replacement_graph.run_id,
+                        question_id=question.id,
+                        transport="cli",
+                        target_ref=None,
+                        body="Need input",
+                        reply_markup=None,
+                        created_at=25,
+                        sent_at=None,
+                        transport_message_id=None,
+                        last_error=None,
+                    ),
+                )
+                assert outbox.question_id == question.id
                 answer = tx.execute(
                     "INSERT INTO human_answer(question_id, raw_text, chosen_option, "
                     "interpreted_json, transport, update_id, received_at) "
@@ -534,6 +846,275 @@ def test_finding_round_history_is_caller_scoped_sorted_and_does_not_filter_close
     asyncio.run(scenario())
 
 
+def test_finding_round_history_sorts_multiple_findings_keeps_closed_and_excludes_neighbor_campaign(
+    database_factory: Callable[[], Awaitable],
+    review_graph_builder: Callable[..., object],
+) -> None:
+    async def scenario() -> None:
+        database = await database_factory()
+        attempts = AttemptRepository()
+        campaigns = CampaignRepository()
+        findings = FindingRepository()
+        try:
+            graph = await database.transaction(
+                lambda tx: review_graph_builder(tx, suffix="history-many")
+            )
+
+            def seed(tx: Transaction) -> tuple[tuple[int, int, int], int]:
+                reconciler = attempts.create_attempt(
+                    tx,
+                    NewStepAttempt(
+                        "A-history-many-reconciler",
+                        graph.run_id,
+                        graph.stage_id,
+                        "reconciler",
+                        graph.campaign_id,
+                        graph.round_id,
+                        None,
+                        None,
+                        "rev-1",
+                        None,
+                        "reviewer-history-many",
+                        "gpt-test",
+                        "reconcile.v1",
+                        "history-many",
+                        None,
+                        None,
+                        None,
+                        "[]",
+                        "{}",
+                        100,
+                    ),
+                )
+                reconciler = attempts.complete_attempt(
+                    tx,
+                    reconciler.id,
+                    AttemptCompletion("succeeded", None, "gpt-test", "out", 101, None, None),
+                )
+                finding_ids: list[int] = []
+                for index in range(1, 4):
+                    observation = findings.create_observation(
+                        tx,
+                        NewReviewObservation(
+                            graph.campaign_id,
+                            graph.round_id,
+                            graph.lane_id,
+                            graph.attempt_id,
+                            graph.subject_id,
+                            "rev-1",
+                            f"history-{index}",
+                            "body",
+                            None,
+                            None,
+                            None,
+                            None,
+                            "medium",
+                            None,
+                            "medium",
+                            f"history-many-{index}",
+                            101 + index,
+                        ),
+                    )
+                    event_id = append_run_event(
+                        tx,
+                        NewRunEvent(
+                            run_id=graph.run_id,
+                            kind=f"history_many_{index}.v1",
+                            payload={},
+                            created_at=101 + index,
+                        ),
+                    )
+                    finding = findings.create_finding(
+                        tx,
+                        NewFinding(
+                            graph.run_id,
+                            graph.subject_id,
+                            graph.campaign_id,
+                            graph.round_id,
+                            observation.id,
+                            "rev-1",
+                            graph.lane_id,
+                            f"history-{index}",
+                            event_id,
+                            101 + index,
+                        ),
+                    )
+                    findings.create_observation_link(
+                        tx,
+                        NewObservationLink(
+                            observation.id,
+                            graph.campaign_id,
+                            graph.round_id,
+                            finding.id,
+                            "first_seen",
+                            reconciler.id,
+                            "reconciler",
+                            "succeeded",
+                            None,
+                            None,
+                            event_id,
+                            101 + index,
+                        ),
+                    )
+                    findings.create_finding_round(
+                        tx,
+                        NewFindingRound(
+                            graph.campaign_id,
+                            graph.run_id,
+                            finding.id,
+                            1,
+                            graph.round_id,
+                            graph.lane_id,
+                            "post_check",
+                            None,
+                            None,
+                            None,
+                        ),
+                    )
+                    finding_ids.append(finding.id)
+
+                for index, finding_id in enumerate(finding_ids[1:], start=1):
+                    close_event = append_run_event(
+                        tx,
+                        NewRunEvent(
+                            run_id=graph.run_id,
+                            kind=f"history_many_close_{index}.v1",
+                            payload={},
+                            created_at=110 + index,
+                        ),
+                    )
+                    findings.create_resolution(
+                        tx,
+                        NewFindingResolution(
+                            graph.run_id,
+                            finding_id,
+                            "verified_fixed",
+                            "reviewer",
+                            graph.campaign_id,
+                            1,
+                            None,
+                            1,
+                            close_event,
+                            110 + index,
+                        ),
+                    )
+
+                reopened_observation = findings.create_observation(
+                    tx,
+                    NewReviewObservation(
+                        graph.campaign_id,
+                        graph.round_id,
+                        graph.lane_id,
+                        graph.attempt_id,
+                        graph.subject_id,
+                        "rev-1",
+                        "history-reopened",
+                        "body",
+                        None,
+                        None,
+                        None,
+                        None,
+                        "medium",
+                        None,
+                        "medium",
+                        "history-reopened",
+                        120,
+                    ),
+                )
+                reopen_event = append_run_event(
+                    tx,
+                    NewRunEvent(
+                        run_id=graph.run_id,
+                        kind="history_many_reopen.v1",
+                        payload={},
+                        created_at=120,
+                    ),
+                )
+                findings.create_observation_link(
+                    tx,
+                    NewObservationLink(
+                        reopened_observation.id,
+                        graph.campaign_id,
+                        graph.round_id,
+                        finding_ids[1],
+                        "reopening",
+                        reconciler.id,
+                        "reconciler",
+                        "succeeded",
+                        None,
+                        "reopened",
+                        reopen_event,
+                        120,
+                    ),
+                )
+
+                neighbor = campaigns.create_campaign(
+                    tx,
+                    NewReviewCampaign(
+                        "C-history-neighbor",
+                        graph.run_id,
+                        graph.stage_id,
+                        graph.subject_id,
+                        2,
+                        "high",
+                        "v1",
+                        1,
+                        121,
+                    ),
+                )
+                neighbor_lane = campaigns.create_lane(
+                    tx, NewReviewLane(neighbor.id, graph.run_id, 0)
+                )
+                neighbor_round = campaigns.create_round(
+                    tx, NewReviewRound(neighbor.id, 1, "discovery", None, 121)
+                )
+                findings.create_finding_round(
+                    tx,
+                    NewFindingRound(
+                        neighbor.id,
+                        graph.run_id,
+                        finding_ids[0],
+                        1,
+                        neighbor_round.id,
+                        neighbor_lane.id,
+                        "post_check",
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+                return tuple(finding_ids), neighbor.id
+
+            finding_ids, neighbor_id = await database.transaction(seed)
+            history = await database.read(
+                lambda db: findings.read_finding_round_history(
+                    db,
+                    graph.campaign_id,
+                    tuple(reversed(finding_ids)),
+                )
+            )
+            assert [entry.finding_id for entry in history] == list(finding_ids)
+            assert len(history) == 3
+            neighbor_history = await database.read(
+                lambda db: findings.read_finding_round_history(
+                    db, neighbor_id, (finding_ids[0],)
+                )
+            )
+            assert neighbor_history[0].round_id != history[0].round_id
+            reopened = await database.read(
+                lambda db: findings.read_finding_status(db, finding_ids[1])
+            )
+            closed = await database.read(
+                lambda db: findings.read_finding_status(db, finding_ids[2])
+            )
+            assert reopened is not None and reopened.status == "open"
+            assert closed is not None and closed.status == "closed"
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
 def test_aggregate_round_trip_projections_and_completeness_reads(
     database_factory: Callable[[], Awaitable],
     review_graph_builder: Callable[..., object],
@@ -547,7 +1128,7 @@ def test_aggregate_round_trip_projections_and_completeness_reads(
         try:
             graph = await database.transaction(review_graph_builder)
 
-            def create_review_rows(tx: Transaction) -> tuple[int, int, int]:
+            def create_review_rows(tx: Transaction) -> tuple[int, int, int, int]:
                 observation = findings.create_observation(
                     tx,
                     NewReviewObservation(
@@ -709,9 +1290,11 @@ def test_aggregate_round_trip_projections_and_completeness_reads(
                         cleared_event_id=None,
                     ),
                 )
-                return observation.id, finding.id, finding_round.id
+                return observation.id, finding.id, finding_round.id, question.id
 
-            observation_id, finding_id, _ = await database.transaction(create_review_rows)
+            observation_id, finding_id, _, question_id = await database.transaction(
+                create_review_rows
+            )
             result = await database.read(
                 lambda db: (
                     campaigns.read_effective_roster(db, graph.campaign_id),
@@ -719,6 +1302,10 @@ def test_aggregate_round_trip_projections_and_completeness_reads(
                     findings.read_scoped_finding_ledger(db, graph.campaign_id),
                     findings.read_current_finding_rounds(db, graph.round_id),
                     findings.read_finding_status(db, finding_id),
+                    findings.read_dispute_candidates(db, graph.round_id),
+                    findings.find_links_with_foreign_finding_run(db, graph.run_id),
+                    questions.get_question(db, question_id),
+                    questions.read_question_observations(db, question_id),
                     RunRepository().read_open_blockers(db, graph.run_id),
                     campaigns.find_missing_discovery_lane_participation(db, graph.round_id),
                     campaigns.find_discovery_without_successful_opinion(db, graph.round_id),
@@ -739,6 +1326,10 @@ def test_aggregate_round_trip_projections_and_completeness_reads(
                 ledger,
                 current,
                 status,
+                disputes,
+                foreign_links,
+                question,
+                question_observations,
                 blockers,
                 missing_lanes,
                 no_opinion,
@@ -767,6 +1358,10 @@ def test_aggregate_round_trip_projections_and_completeness_reads(
             )
             assert current[0].entry_kind == "post_check"
             assert status is not None and status.status == "open"
+            assert disputes == ()
+            assert foreign_links == ()
+            assert question is not None and question.id == question_id
+            assert question_observations == ()
             assert blockers[0].branch_id == graph.branch_id
             assert (missing_lanes, no_opinion, roster_mismatch) == ((), (), ())
             assert (unlinked, missing, issued) == ((), (), ())

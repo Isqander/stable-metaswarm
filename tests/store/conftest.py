@@ -11,6 +11,7 @@ from metaswarm.store.repo import (
     AttemptCompletion,
     AttemptRepository,
     CampaignRepository,
+    NewAuthorRevision,
     NewBranch,
     NewLaneAssignment,
     NewReviewCampaign,
@@ -156,14 +157,64 @@ def build_review_graph(
             assigned_at=8,
         ),
     )
+    preceding_revision_id = None
+    review_revision = "rev-1"
+    if round_kind == "fix_check":
+        author = attempts.create_attempt(
+            tx,
+            NewStepAttempt(
+                public_id=f"A-{suffix}-author",
+                run_id=run.id,
+                stage_id=stage.id,
+                role="author",
+                campaign_id=None,
+                round_id=None,
+                lane_id=None,
+                lane_assignment_id=None,
+                subject_revision=None,
+                session_id=None,
+                profile_id="author",
+                requested_model="author-model",
+                prompt_template_id="author.v1",
+                prompt_hash="author-prompt",
+                rubric_id=None,
+                rubric_hash=None,
+                input_sha="rev-1",
+                input_refs_json="[]",
+                manifest_json="{}",
+                started_at=9,
+            ),
+        )
+        author = attempts.complete_attempt(
+            tx,
+            author.id,
+            AttemptCompletion("succeeded", None, "author-model", "rev-2", 10, None, None),
+        )
+        revision = campaigns.create_author_revision(
+            tx,
+            NewAuthorRevision(
+                campaign_id=campaign.id,
+                stage_id=stage.id,
+                revision_no=1,
+                attempt_id=author.id,
+                attempt_role="author",
+                attempt_outcome="succeeded",
+                input_sha="rev-1",
+                output_sha="rev-2",
+                artifact_revision_id=None,
+                completed_at=10,
+            ),
+        )
+        preceding_revision_id = revision.id
+        review_revision = "rev-2"
     round_record = campaigns.create_round(
         tx,
         NewReviewRound(
             campaign_id=campaign.id,
             round_no=1,
             kind=round_kind,
-            preceding_revision_id=None,
-            opened_at=9,
+            preceding_revision_id=preceding_revision_id,
+            opened_at=11 if round_kind == "fix_check" else 9,
         ),
     )
     attempt = attempts.create_attempt(
@@ -177,7 +228,7 @@ def build_review_graph(
             round_id=round_record.id,
             lane_id=lane.id,
             lane_assignment_id=assignment.id,
-            subject_revision="rev-1",
+            subject_revision=review_revision,
             session_id=None,
             profile_id=profile_id,
             requested_model="gpt-test",
@@ -188,7 +239,7 @@ def build_review_graph(
             input_sha="input-sha",
             input_refs_json="[]",
             manifest_json="{}",
-            started_at=10,
+            started_at=12 if round_kind == "fix_check" else 10,
         ),
     )
     if attempt_outcome is not None:
@@ -200,7 +251,7 @@ def build_review_graph(
                 outcome_detail=None,
                 actual_model="gpt-test",
                 output_sha="output-sha" if attempt_outcome == "succeeded" else None,
-                finished_at=11,
+                finished_at=13 if round_kind == "fix_check" else 11,
                 transcript_path=None,
                 transcript_digest=None,
             ),

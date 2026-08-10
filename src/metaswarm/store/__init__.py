@@ -16,6 +16,7 @@ from .db import (
 from .events import JsonScalar, JsonValue, NewRunEvent, append_run_event
 from .repo._mapping import (
     RepositoryAlreadyTerminal,
+    RepositoryPreconditionFailed,
     RepositoryRecordNotFound,
     ReviewerExposureConflict,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "NewRunEvent",
     "ReadSession",
     "RepositoryAlreadyTerminal",
+    "RepositoryPreconditionFailed",
     "RepositoryRecordNotFound",
     "ReviewerExposureConflict",
     "SQLiteValue",

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import Awaitable, Callable
+
+import pytest
 
 from metaswarm.store import NewRunEvent, Transaction, append_run_event
 from metaswarm.store.repo import (
@@ -14,6 +17,7 @@ from metaswarm.store.repo import (
     NewBranch,
     NewFinding,
     NewFindingResolution,
+    NewHumanQuestion,
     NewObservationLink,
     NewReviewObservation,
     NewRun,
@@ -395,6 +399,236 @@ def test_finding_views_keep_status_period_and_severity_as_distinct_lifecycles(
     asyncio.run(scenario())
 
 
+def test_override_and_resolution_event_uniqueness_keep_last_override_single_valued(
+    database_factory: Callable[[], Awaitable],
+    review_graph_builder: Callable[..., object],
+) -> None:
+    async def scenario() -> None:
+        database = await database_factory()
+        attempts = AttemptRepository()
+        findings = FindingRepository()
+        try:
+            graph = await database.transaction(review_graph_builder)
+
+            def seed(tx: Transaction) -> tuple[int, int, int, int]:
+                reconciler = attempts.create_attempt(
+                    tx,
+                    NewStepAttempt(
+                        "A-c23-reconciler",
+                        graph.run_id,
+                        graph.stage_id,
+                        "reconciler",
+                        graph.campaign_id,
+                        graph.round_id,
+                        None,
+                        None,
+                        "rev-1",
+                        None,
+                        "reviewer-1",
+                        "gpt-test",
+                        "reconcile.v1",
+                        "c23",
+                        None,
+                        None,
+                        None,
+                        "[]",
+                        "{}",
+                        40,
+                    ),
+                )
+                reconciler = attempts.complete_attempt(
+                    tx,
+                    reconciler.id,
+                    AttemptCompletion("succeeded", None, "gpt-test", "out", 41, None, None),
+                )
+                finding_ids: list[int] = []
+                for index in (1, 2):
+                    observation = findings.create_observation(
+                        tx,
+                        NewReviewObservation(
+                            graph.campaign_id,
+                            graph.round_id,
+                            graph.lane_id,
+                            graph.attempt_id,
+                            graph.subject_id,
+                            "rev-1",
+                            f"c23-{index}",
+                            "body",
+                            None,
+                            None,
+                            None,
+                            None,
+                            "low",
+                            None,
+                            "low",
+                            f"c23-{index}",
+                            41 + index,
+                        ),
+                    )
+                    finding_event = append_run_event(
+                        tx,
+                        NewRunEvent(
+                            run_id=graph.run_id,
+                            kind=f"c23_finding_{index}.v1",
+                            payload={},
+                            created_at=41 + index,
+                        ),
+                    )
+                    finding = findings.create_finding(
+                        tx,
+                        NewFinding(
+                            graph.run_id,
+                            graph.subject_id,
+                            graph.campaign_id,
+                            graph.round_id,
+                            observation.id,
+                            "rev-1",
+                            graph.lane_id,
+                            f"c23-{index}",
+                            finding_event,
+                            41 + index,
+                        ),
+                    )
+                    findings.create_observation_link(
+                        tx,
+                        NewObservationLink(
+                            observation.id,
+                            graph.campaign_id,
+                            graph.round_id,
+                            finding.id,
+                            "first_seen",
+                            reconciler.id,
+                            "reconciler",
+                            "succeeded",
+                            None,
+                            None,
+                            finding_event,
+                            41 + index,
+                        ),
+                    )
+                    finding_ids.append(finding.id)
+                shared_event = append_run_event(
+                    tx,
+                    NewRunEvent(
+                        run_id=graph.run_id,
+                        kind="c23_shared_override.v1",
+                        payload={},
+                        created_at=50,
+                    ),
+                )
+                later_event = append_run_event(
+                    tx,
+                    NewRunEvent(
+                        run_id=graph.run_id,
+                        kind="c23_later_override.v1",
+                        payload={},
+                        created_at=51,
+                    ),
+                )
+                findings.create_severity_override(
+                    tx,
+                    NewSeverityOverride(
+                        finding_ids[0], "low", "medium", "first", None, shared_event, 50
+                    ),
+                )
+                findings.create_severity_override(
+                    tx,
+                    NewSeverityOverride(
+                        finding_ids[0], "medium", "critical", "later", None, later_event, 51
+                    ),
+                )
+                findings.create_severity_override(
+                    tx,
+                    NewSeverityOverride(
+                        finding_ids[1], "low", "high", "shared", None, shared_event, 50
+                    ),
+                )
+                return finding_ids[0], finding_ids[1], shared_event, later_event
+
+            first, second, shared_event, later_event = await database.transaction(seed)
+            with pytest.raises(sqlite3.IntegrityError):
+                await database.transaction(
+                    lambda tx: findings.create_severity_override(
+                        tx,
+                        NewSeverityOverride(
+                            first, "low", "high", "duplicate", None, shared_event, 52
+                        ),
+                    )
+                )
+            latest = await database.read(
+                lambda db: tuple(
+                    tuple(row)
+                    for row in db.fetch_all(
+                        "SELECT finding_id,event_id,new_severity FROM finding_last_override "
+                        "ORDER BY finding_id"
+                    )
+                )
+            )
+            assert latest == (
+                (first, later_event, "critical"),
+                (second, shared_event, "high"),
+            )
+            severity = await database.read(lambda db: findings.read_finding_severity(db, first))
+            assert severity is not None and severity.escalation_severity == "critical"
+
+            resolution_event = await database.transaction(
+                lambda tx: append_run_event(
+                    tx,
+                    NewRunEvent(
+                        run_id=graph.run_id,
+                        kind="c23_resolution.v1",
+                        payload={},
+                        created_at=53,
+                    ),
+                )
+            )
+            await database.transaction(
+                lambda tx: findings.create_resolution(
+                    tx,
+                    NewFindingResolution(
+                        graph.run_id,
+                        first,
+                        "policy_closed",
+                        "policy",
+                        graph.campaign_id,
+                        None,
+                        None,
+                        0,
+                        resolution_event,
+                        53,
+                    ),
+                )
+            )
+            with pytest.raises(sqlite3.IntegrityError):
+                await database.transaction(
+                    lambda tx: findings.create_resolution(
+                        tx,
+                        NewFindingResolution(
+                            graph.run_id,
+                            first,
+                            "policy_closed",
+                            "policy",
+                            graph.campaign_id,
+                            None,
+                            None,
+                            0,
+                            resolution_event,
+                            54,
+                        ),
+                    )
+                )
+            columns = await database.read(
+                lambda db: tuple(
+                    row["name"] for row in db.fetch_all("PRAGMA table_info(severity_override)")
+                )
+            )
+            assert "seq" not in columns
+        finally:
+            await database.close()
+
+    asyncio.run(scenario())
+
+
 def test_run_state_priority_covers_terminal_to_idle_and_all_blocker_classes(
     database_factory: Callable[[], Awaitable],
 ) -> None:
@@ -403,20 +637,105 @@ def test_run_state_priority_covers_terminal_to_idle_and_all_blocker_classes(
         runs = RunRepository()
         questions = QuestionRepository()
         try:
-            def seed(tx: Transaction) -> dict[str, int]:
+            def seed(tx: Transaction) -> tuple[dict[str, int], dict[str, str]]:
                 ids: dict[str, int] = {}
                 configurations = (
-                    ("terminal", "succeeded", None, None, "done", None),
-                    ("cancelling", None, None, 2, "done", None),
-                    ("paused", None, 3, None, "done", None),
-                    ("running", None, None, None, "ready", "awaiting_continue"),
-                    ("waiting_human", None, None, None, "blocked", "awaiting_continue"),
-                    ("stalled", None, None, None, "blocked", "dependency"),
-                    ("idle", None, None, None, "done", None),
+                    ("terminal", "succeeded", "succeeded", None, None, "done", (), False),
+                    ("cancelling", "cancelling", None, None, 2, "done", (), False),
+                    ("paused", "paused", None, 3, None, "done", (), False),
+                    (
+                        "running",
+                        "running",
+                        None,
+                        None,
+                        None,
+                        "ready",
+                        ("dependency",),
+                        False,
+                    ),
+                    (
+                        "waiting_question",
+                        "waiting_human",
+                        None,
+                        None,
+                        None,
+                        "blocked",
+                        ("human_question",),
+                        False,
+                    ),
+                    (
+                        "waiting_continue",
+                        "waiting_human",
+                        None,
+                        None,
+                        None,
+                        "blocked",
+                        ("awaiting_continue",),
+                        False,
+                    ),
+                    (
+                        "stalled_dependency",
+                        "stalled",
+                        None,
+                        None,
+                        None,
+                        "blocked",
+                        ("dependency",),
+                        False,
+                    ),
+                    (
+                        "stalled_drift",
+                        "stalled",
+                        None,
+                        None,
+                        None,
+                        "blocked",
+                        ("drift",),
+                        False,
+                    ),
+                    (
+                        "stalled_invalid_graph",
+                        "stalled",
+                        None,
+                        None,
+                        None,
+                        "blocked",
+                        ("invalid_graph",),
+                        False,
+                    ),
+                    (
+                        "mixed_human_and_stalled",
+                        "waiting_human",
+                        None,
+                        None,
+                        None,
+                        "blocked",
+                        ("drift", "human_question"),
+                        False,
+                    ),
+                    (
+                        "cleared_blocker",
+                        "idle",
+                        None,
+                        None,
+                        None,
+                        "done",
+                        ("dependency",),
+                        True,
+                    ),
+                    ("idle", "idle", None, None, None, "done", (), False),
                 )
-                for index, (name, terminal, paused, cancelled, branch_state, blocker) in enumerate(
-                    configurations, start=1
-                ):
+                expected: dict[str, str] = {}
+                for index, (
+                    name,
+                    expected_state,
+                    terminal,
+                    paused,
+                    cancelled,
+                    branch_state,
+                    blockers,
+                    cleared,
+                ) in enumerate(configurations, start=1):
                     run = runs.create_run(
                         tx,
                         NewRun(
@@ -459,7 +778,25 @@ def test_run_state_priority_covers_terminal_to_idle_and_all_blocker_classes(
                             created_at=index,
                         ),
                     )
-                    if blocker is not None:
+                    for blocker in blockers:
+                        question_id = None
+                        if blocker == "human_question":
+                            question_id = questions.create_question(
+                                tx,
+                                NewHumanQuestion(
+                                    run.id,
+                                    branch.id,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    "open_question",
+                                    "state question",
+                                    None,
+                                    None,
+                                    index,
+                                ),
+                            ).id
                         questions.create_blocker(
                             tx,
                             NewBlocker(
@@ -468,25 +805,30 @@ def test_run_state_priority_covers_terminal_to_idle_and_all_blocker_classes(
                                 branch_id=branch.id,
                                 task_id=None,
                                 stage_id=None,
-                                question_id=None,
+                                question_id=question_id,
                                 detail=None,
                                 created_at=index,
                                 created_event_id=event,
-                                cleared_at=None,
-                                cleared_event_id=None,
+                                cleared_at=index if cleared else None,
+                                cleared_event_id=event if cleared else None,
                             ),
                         )
                     ids[name] = run.id
-                return ids
+                    expected[name] = expected_state
+                return ids, expected
 
-            ids = await database.transaction(seed)
+            ids, expected = await database.transaction(seed)
             actual = await database.read(
                 lambda db: {
                     name: runs.read_run_state(db, run_id).state  # type: ignore[union-attr]
                     for name, run_id in ids.items()
                 }
             )
-            assert actual == {**{name: name for name in ids}, "terminal": "succeeded"}
+            assert actual == expected
+            run_columns = await database.read(
+                lambda db: tuple(row["name"] for row in db.fetch_all("PRAGMA table_info(run)"))
+            )
+            assert "state" not in run_columns
         finally:
             await database.close()
 

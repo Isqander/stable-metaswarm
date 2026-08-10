@@ -40,6 +40,10 @@ class ReviewerExposureConflict(StoreError):
         )
 
 
+class RepositoryPreconditionFailed(StoreError):
+    """A repository operation received a state forbidden by its contract."""
+
+
 def map_row[T](record_type: type[T], row: sqlite3.Row) -> T:
     return record_type(**{field.name: row[field.name] for field in fields(record_type)})
 
@@ -100,8 +104,8 @@ def next_autoincrement_id(tx: Transaction, table: str) -> int:
     return int(row["next_id"])
 
 
-def repository_precondition(message: str) -> sqlite3.IntegrityError:
-    return sqlite3.IntegrityError(message)
+def repository_precondition(message: str) -> RepositoryPreconditionFailed:
+    return RepositoryPreconditionFailed(message)
 
 
 def dataclass_values(value: object) -> tuple[Any, ...]:
