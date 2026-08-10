@@ -84,6 +84,8 @@ class NewRunEvent:
         branch_id: int | None = None,
         stage_id: int | None = None,
     ) -> None:
+        if not isinstance(kind, str):
+            raise EventPayloadError("event kind must be a string")
         kind = _validate_string(kind, path="kind")
         if not isinstance(payload, Mapping):
             raise EventPayloadError("event payload must be a mapping")

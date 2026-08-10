@@ -217,6 +217,22 @@ def test_event_kind_rejects_lone_surrogate_as_payload_error(kind: str) -> None:
         NewRunEvent(run_id=1, kind=kind, payload={}, created_at=1)
 
 
+@pytest.mark.parametrize("kind", [123, b"event.v1", None])
+def test_event_kind_must_be_a_string(kind: object) -> None:
+    with pytest.raises(EventPayloadError, match="event kind must be a string"):
+        NewRunEvent(
+            run_id=1,
+            kind=kind,  # type: ignore[arg-type]
+            payload={},
+            created_at=1,
+        )
+
+
+def test_event_kind_accepts_valid_non_bmp_scalar() -> None:
+    event = NewRunEvent(run_id=1, kind="review-😀.v1", payload={}, created_at=1)
+    assert event.kind == "review-😀.v1"
+
+
 def test_invalid_payload_inside_transaction_rolls_back_prior_state(tmp_path: Path) -> None:
     async def scenario() -> None:
         database = await Database.open(tmp_path / "state.sqlite3", core_version="test-core")
