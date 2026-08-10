@@ -14,6 +14,7 @@
     python3 scripts/checks/mutation-check.py --coverage-baseline scripts/checks/mutations.tsv scripts/checks/debt-baseline.tsv
     python3 scripts/checks/mutation-check.py --schema-sync docs/design/db-schema.md scripts/checks
     python3 scripts/checks/mutation-check.py --schema-sync-baseline docs/design/db-schema.md scripts/checks scripts/checks/debt-baseline.tsv
+    python3 scripts/checks/mutation-check.py --self-test-schema-sync
     python3 scripts/checks/mutation-check.py <файл.sql> "<мутация>" [ещё…]
 
 `--coverage` отвечает на вопрос, который манифест сам о себе не задаёт: какие
@@ -70,9 +71,15 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 
-from schema_utils import execute_design_schema, explicit_indexes, table_ddl
+from schema_utils import (
+    execute_design_schema,
+    explicit_indexes,
+    table_ddl,
+    trigger_ddls,
+)
 
 RUNNER = Path(__file__).with_name("run-sql-check.py")
 
@@ -457,17 +464,8 @@ def granular_exemptions(source: str):
     }
 
 
-def trigger_blocks(source: str):
-    return [
-        (match.group(1), match.group(0))
-        for match in re.finditer(
-            r"(?ms)^CREATE TRIGGER\s+(\w+)\b.*?^END;\s*$", source
-        )
-    ]
-
-
 def normalized_trigger(block: str) -> str:
-    return squash(strip_comments(block))
+    return squash(strip_comments(block)).rstrip(";")
 
 
 def read_debt_baseline(path: str):
@@ -518,30 +516,55 @@ def run_schema_sync(design_path: str, scenario_dir: str,
                     debt_baseline=None) -> int:
     """Сверить trigger'ы и table constraints design со стабами в обе стороны."""
     design = io.open(design_path, encoding="utf-8").read()
-    normative_rows = trigger_blocks(design)
     scenarios = sorted(Path(scenario_dir).glob("*.sql"))
-    scenario_rows = []
-    locations = {}
-    for path in scenarios:
-        source = io.open(path, encoding="utf-8").read()
-        for name, block in trigger_blocks(source):
-            scenario_rows.append((name, block))
-            locations.setdefault(name, []).append(str(path).replace("\\", "/"))
 
-    normative = {}
-    duplicate_normative = set()
-    for name, block in normative_rows:
-        if name in normative:
-            duplicate_normative.add(name)
-        normative[name] = normalized_trigger(block)
+    # Все schema-объекты читаются из реально созданной SQLite-схемы, а не
+    # regexp'ом по Markdown/SQL. Поэтому однострочный CREATE TRIGGER виден так
+    # же, как многострочный, а форматирование не влияет на parity.
+    try:
+        normative_con = sqlite3.connect(":memory:")
+        normative_con.execute("PRAGMA foreign_keys = ON")
+        normative_con.execute("PRAGMA recursive_triggers = ON")
+        execute_design_schema(normative_con, design)
+        normative_tables = table_ddl(normative_con)
+        normative_indexes = explicit_indexes(normative_con)
+        normative_triggers = trigger_ddls(normative_con)
+        normative_con.close()
 
+        scenario_tables = {}
+        scenario_indexes = {}
+        scenario_triggers = {}
+        for path in scenarios:
+            source = io.open(path, encoding="utf-8").read()
+            ddl = source.partition("-- === данные ===")[0]
+            con = sqlite3.connect(":memory:")
+            con.executescript(ddl)
+            location = str(path).replace("\\", "/")
+            scenario_tables[location] = table_ddl(con)
+            scenario_indexes[location] = explicit_indexes(con)
+            scenario_triggers[location] = trigger_ddls(con)
+            con.close()
+    except (sqlite3.Error, ValueError) as exc:
+        print("BROKEN schema parity: %s: %s" % (type(exc).__name__, exc))
+        return 1
+
+    normative = {
+        name: normalized_trigger(block)
+        for name, block in normative_triggers.items()
+    }
     actual = {}
+    locations = {}
     duplicate_scenarios = set()
-    for name, block in scenario_rows:
-        normalized = normalized_trigger(block)
-        if name in actual:
-            duplicate_scenarios.add(name)
-        actual[name] = normalized
+    trigger_conflicts = set()
+    for location, rows in scenario_triggers.items():
+        for name, block in rows.items():
+            normalized = normalized_trigger(block)
+            if name in actual:
+                duplicate_scenarios.add(name)
+                if actual[name] != normalized:
+                    trigger_conflicts.add(name)
+            actual.setdefault(name, normalized)
+            locations.setdefault(name, []).append(location)
 
     missing = sorted(set(normative) - set(actual))
     extra = sorted(set(actual) - set(normative))
@@ -557,54 +580,32 @@ def run_schema_sync(design_path: str, scenario_dir: str,
         print("EXTRA    %s — %s" % (name, ", ".join(locations[name])))
     for name in different:
         print("DIFF     %s — %s" % (name, ", ".join(locations[name])))
-    for name in sorted(duplicate_normative):
-        print("DUPLICATE design %s" % name)
     for name in sorted(duplicate_scenarios):
         print("DUPLICATE scenario %s — %s"
+              % (name, ", ".join(locations[name])))
+    for name in sorted(trigger_conflicts):
+        print("CONFLICT scenario %s — %s"
               % (name, ", ".join(locations[name])))
 
     print(
         chr(10)
         + "trigger'ов: нормативных %d / в сценариях %d / совпало %d / "
-          "без сценария %d / "
-          "расходятся %d / лишних %d / дублей %d"
+          "без сценария %d / расходятся %d / лишних %d / дублей %d / "
+          "конфликтов %d"
         % (
             len(normative), len(actual), matched, len(missing),
-            len(different), len(extra),
-            len(duplicate_normative) + len(duplicate_scenarios),
+            len(different), len(extra), len(duplicate_scenarios),
+            len(trigger_conflicts),
         )
     )
-    trigger_bad = bool(missing or extra or different or duplicate_normative
-                       or duplicate_scenarios)
+    trigger_bad = bool(
+        missing or extra or different or duplicate_scenarios or trigger_conflicts
+    )
 
     # Trigger parity недостаточно: CHECK/FK/UNIQUE внутри CREATE TABLE могли
     # отсутствовать во всех стабах и потому не попадать даже в --coverage.
-    # Обе стороны читаются из реально созданной SQLite-схемы, а не regexp'ом
-    # по Markdown. Исключения те же, что у structural coverage: инлайновые
-    # одноколоночные REFERENCES и родительские UNIQUE составных FK.
-    try:
-        normative_con = sqlite3.connect(":memory:")
-        normative_con.execute("PRAGMA foreign_keys = ON")
-        normative_con.execute("PRAGMA recursive_triggers = ON")
-        execute_design_schema(normative_con, design)
-        normative_tables = table_ddl(normative_con)
-        normative_indexes = explicit_indexes(normative_con)
-        normative_con.close()
-
-        scenario_tables = {}
-        scenario_indexes = {}
-        for path in scenarios:
-            source = io.open(path, encoding="utf-8").read()
-            ddl = source.partition("-- === данные ===")[0]
-            con = sqlite3.connect(":memory:")
-            con.executescript(ddl)
-            location = str(path).replace("\\", "/")
-            scenario_tables[location] = table_ddl(con)
-            scenario_indexes[location] = explicit_indexes(con)
-            con.close()
-    except (sqlite3.Error, ValueError) as exc:
-        print("BROKEN table parity: %s: %s" % (type(exc).__name__, exc))
-        return 1
+    # Исключения те же, что у structural coverage: инлайновые одноколоночные
+    # REFERENCES и родительские UNIQUE составных FK.
 
     normative_references = referenced_keys(normative_tables)
     normative_constraints, normative_dead = constraints_of(
@@ -722,6 +723,54 @@ def run_schema_sync(design_path: str, scenario_dir: str,
         index_missing_bad or extra_indexes or different_indexes or index_conflicts
     )
     return 1 if trigger_bad or constraint_bad or index_bad else 0
+
+
+def run_schema_sync_self_test() -> int:
+    """Регрессия: однострочный trigger виден и в parity, и как EXTRA."""
+    design = """# schema-sync self-test
+
+```sql
+CREATE TABLE sample (id INTEGER PRIMARY KEY);
+CREATE TRIGGER trg_one_line AFTER INSERT ON sample BEGIN SELECT 1; END;
+```
+"""
+    matching = """CREATE TABLE sample (id INTEGER PRIMARY KEY);
+CREATE TRIGGER trg_one_line AFTER INSERT ON sample BEGIN SELECT 1; END;
+"""
+    extra = (
+        matching
+        + "CREATE TRIGGER trg_extra_one_line AFTER DELETE ON sample "
+          "BEGIN SELECT 1; END;\n"
+    )
+
+    with tempfile.TemporaryDirectory(prefix="schema-sync-self-test-") as temp:
+        root = Path(temp)
+        design_path = root / "design.md"
+        scenario_dir = root / "scenarios"
+        scenario_path = scenario_dir / "one-line.sql"
+        scenario_dir.mkdir()
+        design_path.write_text(design, encoding="utf-8")
+
+        scenario_path.write_text(matching, encoding="utf-8")
+        matching_output = io.StringIO()
+        with redirect_stdout(matching_output):
+            matching_code = run_schema_sync(str(design_path), str(scenario_dir))
+        if matching_code != 0:
+            print("FAIL  matching one-line trigger не прошёл schema-sync")
+            print(matching_output.getvalue())
+            return 1
+
+        scenario_path.write_text(extra, encoding="utf-8")
+        extra_output = io.StringIO()
+        with redirect_stdout(extra_output):
+            extra_code = run_schema_sync(str(design_path), str(scenario_dir))
+        if extra_code != 1 or "EXTRA    trg_extra_one_line" not in extra_output.getvalue():
+            print("FAIL  лишний one-line trigger не обнаружен как EXTRA")
+            print(extra_output.getvalue())
+            return 1
+
+    print("OK    schema-sync видит matching и лишний однострочный trigger")
+    return 0
 
 
 def run_coverage(path: str, debt_baseline=None) -> int:
@@ -936,6 +985,8 @@ def main(argv) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
+    if len(argv) == 2 and argv[1] == "--self-test-schema-sync":
+        return run_schema_sync_self_test()
     if len(argv) == 3 and argv[1] == "--coverage":
         return run_coverage(argv[2])
     if len(argv) == 4 and argv[1] == "--coverage-baseline":

@@ -191,7 +191,10 @@ Scope-координаты (какие ID обязаны быть из одно�
 `python3 scripts/checks/mutation-check.py --schema-sync docs/design/db-schema.md scripts/checks`:
 он сверяет design со всеми SQL-сценариями в обе стороны: полный набор и тела
 `CREATE TRIGGER`, а также table-level `CHECK`/FK/`UNIQUE` из реально собранных
-SQLite-схем. Это ловит ограничение, которого нет ни в одном стабе и которое
+SQLite-схем. Trigger'ы читаются из `sqlite_master`, поэтому однострочная и
+многострочная запись равноправны; регрессию парсинга проверяет
+`python3 scripts/checks/mutation-check.py --self-test-schema-sync`. Это ловит
+ограничение, которого нет ни в одном стабе и которое
 поэтому принципиально не могло попасть в обычный `--coverage`. Отсутствующий
 свидетель — долг и ненулевой exit, даже если trigger-parity уже чистая;
 инлайновые одноколоночные FK и родительские `UNIQUE (id, <scope>)` исключаются

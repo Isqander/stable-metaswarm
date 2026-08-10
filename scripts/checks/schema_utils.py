@@ -82,3 +82,19 @@ def explicit_indexes(connection: sqlite3.Connection):
             "WHERE type='index' AND sql IS NOT NULL ORDER BY name"
         )
     }
+
+
+def trigger_ddls(connection: sqlite3.Connection):
+    """Именованные trigger'ы из реально собранной схемы.
+
+    Чтение из sqlite_master намеренно не зависит от того, записан CREATE
+    TRIGGER в одну строку или в несколько. Это тот же источник, по которому
+    schema parity уже сверяет таблицы и явные индексы.
+    """
+    return {
+        row[0]: row[1]
+        for row in connection.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type='trigger' AND sql IS NOT NULL ORDER BY name"
+        )
+    }
