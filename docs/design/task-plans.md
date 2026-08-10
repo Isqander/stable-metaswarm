@@ -380,11 +380,12 @@ rollback не оставляет identity, а committed allocator не пере�
 опубликованный INTEGER ID.
 Строки `issued` проходят строгий гейт author revision/owner decision, новый
 finding получает `post_check` без фиктивных ответов и не блокирует закрытие
-текущего круга. Перед result в discovery и fix-check пусты три гейта: unlinked
+текущего круга. Перед result пусты три общих логических гейта: unlinked
 observations, отсутствующее участие открытого finding и incomplete `issued`; в
-discovery к ним добавляется четвёртый — слот кворума без успешной попытки
-ревьюера этого круга либо `lane_waiver` на него, плюс требование хотя бы одного
-успешного мнения. Human gate одной транзакцией создаёт branch-scoped
+discovery к ним добавляется четвёртый lane-participation, реализованный тремя
+read'ами: слот кворума без успешной попытки текущего назначения либо
+`lane_waiver`, отсутствие хотя бы одного успешного мнения и несовпадение
+effective roster с `expected_lane_count`. Human gate одной транзакцией создаёт branch-scoped
 blocker и переводит ветку в `blocked`, поэтому Run без активного соседа
 показывает `waiting_human`; вопрос форматирует чистый порт только после
 единственного `AskHuman` и получает его завёрнутым в `AfterCheckGate`, а не
@@ -564,6 +565,17 @@ golden-тесты против ловушек YAML. `max_author_revisions` — �
 наименьшим индексом (`agent-contracts.md` §4.3), то есть ту же пару на той же
 ревизии, — именно этот штатный путь и ломал прежнюю трактовку exposure.
 
+Открытием review-кампании владеет именованная операция
+`open_review_campaign()`. Одной транзакцией она создаёт или берёт
+`review_subject`, фиксирует immutable snapshot кампании и
+`expected_lane_count`, отбирает точный свежий набор неавторских resolved
+provider/model-пар, пишет слоты `review_lane`, первые `lane_assignment`,
+`review_round(1, discovery)` и одно событие. Никакого spawn до commit нет.
+`UNIQUE(stage_id, ordinal)` только обнаруживает повтор: операция при конфликте
+читает существующий aggregate, сверяет subject/snapshot/число и состав
+слотов/назначений/round 1 и либо возвращает тот же campaign ID без второго
+события, либо выдаёт invariant error.
+
 Внешняя транзакционная операция называется
 `create_attempt_and_reserve_exposure()` и владеет тем, что база проверить не
 может: **какую ревизию предмета получает агент**. Предусловие — ревизия
@@ -599,13 +611,27 @@ golden-тесты против ловушек YAML. `max_author_revisions` — �
 правильно, а T1.18 всё равно сможет обойтись обычным `INSERT` и воскресить
 C-04.
 
+Перед spawn primary reconciler планировщик вызывает
+`T1.7b.complete_discovery()` и начинает внешний эффект только после его
+commit. Перед spawn reconciler в `fix_check` он запускает те же authoritative
+finding-coverage/strict-issued reads T1.3, что и
+`T1.7b.apply_reconciliation()`: хотя бы один неответивший owner запрещает
+создание попытки и spawn. Snapshot/attempt/result несут один `round_id`.
+
+По Q57-A обработка `lane_failure` зависит от вида круга: в `discovery`
+доступны waiver, replacement и остановка; в `fix_check` — только остановка
+ветки. Свежий исполнитель не получает authority прежнего owner.
+
 **Готово, когда:** кворум с разными `rubric_hash` отклоняется **до** запуска;
 принятый дрейф по code SHA обесценивает прежнее ревью; смена major вендорского
 CLI не принимается флагом; **пара provider+model, авторившая ревизию, не
 попадает в линии её проверки**, а конфиг флоу, где автор и ревьюер стадии
 резолвятся в одну фактическую пару, не загружается вовсе; исчерпание бюджета
-линии даёт вопрос с вариантом «продолжить деградированным кворумом», и факт
-понижения сохраняется.
+линии в discovery даёт вопрос с тремя вариантами, replacement/waiver сохраняют
+audit и не меняют число слотов; тот же отказ в `fix_check` предлагает только
+остановку. Отдельные AC доказывают атомарное/idempotent открытие кампании и
+откат неполного aggregate, commit `discovery_completed` до spawn и отсутствие
+reconciler attempt при одном неответившем owner.
 
 ### T1.19 · IPC и CLI · 3 д
 

@@ -660,7 +660,7 @@ answer относится к кампании целиком.
 ### 7.1. Кампания ревью от начала до конца
 
 ```
-1. Открытие кампании
+1. Открытие кампании — T1.18 `open_review_campaign()`
    ├─ создать review_subject (или взять существующий) и review_campaign
    ├─ снять snapshot: severity_threshold, policy_version
    ├─ набрать линии: профили, чьи пары provider+model свободны по
@@ -683,7 +683,7 @@ answer относится к кампании целиком.
    линия ждёт повтора упавшей в пределах бюджета.
    Бюджет исчерпан → вопрос человеку, см. ниже.
 
-2а. Слепая фаза завершена
+2а. Слепая фаза завершена — T1.7b `complete_discovery()`
    ├─ гейт участия линий пуст (три запроса, db-schema.md §5.2)
    └─ TX: campaign.state='reconciliation' + событие discovery_completed,
       закоммичено ДО spawn reconciler — иначе после падения recovery
@@ -720,6 +720,9 @@ answer относится к кампании целиком.
      │       + follow-up observation + recurrence после проверки T1.6
      │       + resolutions + unclassified new_observations
      ├─ если new_observations не пусты:
+     │    сначала authoritative finding-coverage/strict-issued gate:
+     │    все owners этого круга уже ответили; T1.18 проверяет до spawn,
+     │    T1.7b повторяет как precondition применения результата
      │    reconciliation T1.5 на текущем fix_check
      │    → новые finding/links
      │      + finding_round(entry_kind=post_check), только если target ещё не
@@ -768,7 +771,7 @@ Reconciliation T1.5 — единственное место, где выдаёт
 остаётся окно, в котором `continue` продолжит работу с прежним составом линий.
 
 **Набор вариантов зависит от вида круга.** Все три доступны в `discovery`. В
-`fix_check` при действующем Q57-A остаётся один — остановить ветку:
+`fix_check` по принятому решению Q57-A остаётся один — остановить ветку:
 
 - замена запрещена, потому что решения по findings выносит тот, кто их нашёл и
   помнит (§6.3 `decision.md`);

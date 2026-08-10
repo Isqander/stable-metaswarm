@@ -106,7 +106,9 @@ trigger-parity не выдаётся за полную parity схемы. Для
 T1.2, repository-примитивы (`reserve_reviewer_exposure()`) — T1.3, потребление
 готовых attempt и exposure — T1.7b, а внешняя операция
 `create_attempt_and_reserve_exposure()` вместе с проверкой легальности
-ревизии — **T1.18 в пакете P1-D**.
+ревизии — **T1.18 в пакете P1-D**. Там же живёт
+`open_review_campaign()`; переход до reconciliation — отдельная операция
+`T1.7b.complete_discovery()`.
 
 **Историческая baseline-проверка шестой редакции (2026-08-05).** Тогдашняя
 связная DDL была исполнена целиком в SQLite in-memory: 61 таблица, 24 индекса,
@@ -1195,7 +1197,7 @@ findings, а его строки `issued` всё равно требуют ре�
 gate не пройдёт. Записанный waiver стал бы durable no-op: человек ответил,
 система что-то сохранила, ветка всё равно встала. Значит и набор вариантов в
 самом вопросе `lane_failure` зависит от вида круга: в `discovery` их три, в
-`fix_check` при действующем Q57-A остаётся один — остановить ветку.
+`fix_check` по принятому решению Q57-A остаётся один — остановить ветку.
 
 Обе — repository-операции внутри чужой транзакции, без собственных границ
 коммита. Повтор при доставке того же ответа останавливают `UNIQUE (question_id)`
@@ -1215,8 +1217,9 @@ gate не пройдёт. Записанный waiver стал бы durable no-o
 владельцем слот стать не успел), в `fix_check` — запрещена предусловием
 операции. Если владелец исчерпал бюджет в `fix_check`, остаётся одна остановка
 ветки: деградация findings с владельца не снимает, круг всё равно не закроется,
-и потому waiver там тоже запрещён. Это узкое место вынесено вопросом **Q57** в
-[open-questions.md](../requirements/open-questions.md).
+и потому waiver там тоже запрещён. Это явное решение **Q57-A** в
+[open-questions.md](../requirements/open-questions.md), а не временное
+ограничение реализации.
 
 **Почему машина состояний кампании живёт в базе, а не только в T1.4.** Ревью
 P1-A нашло разрыв (C-01a): переход `discovery → reconciliation` был назван, но
@@ -1466,15 +1469,17 @@ FROM review_campaign c;
 -- author_revision, который проверяет этот fix_check, и решение владельца
 -- не вынесено успешной reviewer-попыткой той же стадии.
 SELECT fr.finding_id
-  FROM finding_round fr
-  JOIN review_round rr
-    ON rr.campaign_id = fr.campaign_id AND rr.round_no = fr.round_no
+  FROM review_round rr
+  JOIN finding_round fr
+    ON fr.round_id = rr.id
+   AND fr.campaign_id = rr.campaign_id
+   AND fr.round_no = rr.round_no
   JOIN review_campaign c ON c.id = fr.campaign_id
   LEFT JOIN author_revision ar
     ON ar.id = rr.preceding_revision_id AND ar.campaign_id = fr.campaign_id
   LEFT JOIN step_attempt d ON d.id = fr.author_attempt_id
   LEFT JOIN step_attempt a ON a.id = fr.reviewer_attempt_id
- WHERE fr.campaign_id = :campaign_id AND fr.round_no = :round_no
+ WHERE rr.id = :round_id
    AND fr.entry_kind = 'issued'
    AND (rr.kind <> 'fix_check'
         OR ar.id IS NULL
@@ -1517,23 +1522,38 @@ finding обязан иметь в текущем круге ровно одну
 ```sql
 -- Должен вернуть 0 строк перед закрытием review_round.
 SELECT fs.finding_id
-  FROM finding_status fs
+  FROM review_round rr
+ CROSS JOIN finding_status fs
  WHERE fs.status = 'open'
+   AND rr.id = :round_id
    AND EXISTS (
          SELECT 1
            FROM finding_observation_link l
            JOIN review_observation o ON o.id = l.observation_id
           WHERE l.finding_id = fs.finding_id
-            AND o.campaign_id = :campaign_id
+             AND o.campaign_id = rr.campaign_id
        )
    AND NOT EXISTS (
          SELECT 1
            FROM finding_round fr
-          WHERE fr.campaign_id = :campaign_id
-            AND fr.round_no = :round_no
-            AND fr.finding_id = fs.finding_id
+           WHERE fr.round_id = rr.id
+             AND fr.campaign_id = rr.campaign_id
+             AND fr.round_no = rr.round_no
+             AND fr.finding_id = fs.finding_id
        );
 ```
+
+Оба запроса принимают только `round_id` и сами выводят campaign/round number.
+Это не удобство API, а защита от проверки одного круга перед записью результата
+другого; тот же `round_id` несут command, attempt и validated reconciliation
+result.
+
+Для `fix_check` finding-coverage и strict-issued — не только closing gates.
+Они обязаны быть пусты **до spawn reconciler** в T1.18 и повторно до применения
+его результата в `T1.7b.apply_reconciliation()`: иначе observation owner A
+классифицируется по ledger до ещё не записанного решения owner B. Unlinked gate
+в этой ранней точке намеренно не запускается — новые observations как раз ждут
+reconciliation и законно ещё не имеют link.
 
 При создании `fix_check` exact open set и все его `issued`-строки пишутся одной
 транзакцией. Позднее reconciliation может законно добавить `post_check`, поэтому
@@ -3408,8 +3428,8 @@ SELECT EXISTS (SELECT 1 FROM task WHERE run_id = :r AND state NOT IN ('done','ca
 | Получен ответ | `telegram_inbox.handled_at` + `human_answer` + `blocker(human_question).cleared_at` + новый `blocker(awaiting_continue, branch_id)` + сохранённый `branch.state='blocked'` + review-следствие (`stage_execution.max_author_revisions += 1` при дополнительной правке; `review_campaign.state='closed_escalated'` при окончательном ответе; `lane_assignment` нового поколения либо `lane_waiver` при ответе на `lane_failure`) + `run_event` |
 | Задача выполнена | CAS `complete_attempt()` + `task.state='done'` + пересчёт готовности зависимых + `run_event` |
 | Круг ревью закрыт | Все `finding_round` круга + CAS `close_round()` + `finding_resolution` по закрытым + состояние кампании (`closed_clean` при успехе; прежний `fix_cycle` при `escalated` до ответа человека) + `run_event` |
-| Кампания открыта | `review_subject` (или существующий) + `review_campaign(state='discovery')` со snapshot порога + слоты `review_lane` + первые `lane_assignment` + `review_round(1, discovery)` + `run_event` |
-| Слепая фаза завершена | `review_campaign.state='reconciliation'` + `run_event(discovery_completed)`; коммит **до** spawn reconciler, иначе после падения recovery всё ещё видит `discovery` |
+| Кампания открыта — T1.18 `open_review_campaign()` | `review_subject` (или существующий) + `review_campaign(state='discovery')` со snapshot порога + слоты `review_lane` + первые `lane_assignment` + `review_round(1, discovery)` + `run_event`; повтор сверяет весь aggregate и не пишет второе событие |
+| Слепая фаза завершена — T1.7b `complete_discovery()` | три lane-participation reads пусты + `review_campaign.state='reconciliation'` + `run_event(discovery_completed)`; коммит **до** spawn reconciler, иначе после падения recovery всё ещё видит `discovery` |
 | Импорт графа | `task_graph_import` + `task` + `task_dependency` + инвалидация задач прежней ревизии + `run_event` |
 | Эскалация | CAS `close_round(result='escalated')` + `human_question(snapshot_json)` + `notification_outbox` + `blocker(branch_id, question_id)` + `branch.state='blocked'` + сохранённый `review_campaign.state='fix_cycle'` + `run_event` |
 
@@ -3901,8 +3921,9 @@ P1-A транспорт всегда `cli`, потому что отправит
 от проверки есть остановка ветки. **Третья:** замена исполнителя разрешена
 только до `discovery_completed` — смена владельца в `fix_check` отдала бы
 решения по findings свежему агенту, а §6.3 `decision.md` обосновывает владение
-именно памятью прежнего. Это контракт разрешения findings, поэтому вынесено
-вопросом Q57, а не решено проектированием.
+именно памятью прежнего. Владелец явно выбрал Q57-A 2026-08-10: перенос
+authority запрещён, а отказ владельца останавливает ветку. Это контракт
+разрешения findings, а не следствие удобства выбранной схемы.
 
 **24. Машина состояний кампании и две её операции.** §6.6 `decision.md`
 перечисляет переходы, но открытие кампании и завершение слепой фазы в список не
