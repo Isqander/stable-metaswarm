@@ -24,6 +24,9 @@ where = ["src"]
 include = ["metaswarm*"]
 namespaces = false
 
+[tool.setuptools.package-data]
+"metaswarm.store.migrations" = ["*.sql"]
+
 [tool.pytest.ini_options]
 minversion = "9.1"
 addopts = ["--strict-config", "--strict-markers"]
