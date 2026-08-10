@@ -720,7 +720,8 @@ answer относится к кампании целиком.
      │       + follow-up observation + recurrence после проверки T1.6
      │       + resolutions + unclassified new_observations
      ├─ если new_observations не пусты:
-     │    сначала authoritative finding-coverage/strict-issued gate:
+     │    сначала перечитать exact open fix_check по round_id, затем
+     │    authoritative finding-coverage/strict-issued gate:
      │    все owners этого круга уже ответили; T1.18 проверяет до spawn,
      │    T1.7b повторяет как precondition применения результата
      │    reconciliation T1.5 на текущем fix_check

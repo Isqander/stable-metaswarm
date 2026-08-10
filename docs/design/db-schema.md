@@ -1548,6 +1548,14 @@ SELECT fs.finding_id
 другого; тот же `round_id` несут command, attempt и validated reconciliation
 result.
 
+Чистый SQL для отсутствующего `round_id` вернул бы пустое множество и тем самым
+смешал бы «нарушений нет» с «круга нет». Поэтому T1.3 оборачивает **все шесть**
+completeness queries (три lane-participation, эти два и unlinked из §5.4) в
+required-read: сначала должна существовать строка `review_round`, иначе
+`RepositoryRecordNotFound`. Требование open не вшивается в recovery-read:
+T1.7b и T1.18 отдельно перечитывают exact round и проверяют его lifecycle до
+решения или spawn.
+
 Для `fix_check` finding-coverage и strict-issued — не только closing gates.
 Они обязаны быть пусты **до spawn reconciler** в T1.18 и повторно до применения
 его результата в `T1.7b.apply_reconciliation()`: иначе observation owner A
