@@ -20,6 +20,7 @@ def git(*args: str, input_text: str | None = None, check: bool = True) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
     )
     if check and result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
