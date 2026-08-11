@@ -9,6 +9,7 @@ from metaswarm.agents import (
     AgentContractError,
     AgentSchema,
     ValidationContextError,
+    render_retry_feedback,
     validate_agent_result,
 )
 from metaswarm.agents.parse import RESULT_BEGIN, RESULT_END
@@ -107,7 +108,20 @@ def test_all_five_verification_policy_rejections_preserve_the_typed_plan() -> No
 
 
 @pytest.mark.parametrize(
-    "shell_fragment", ("&&", "|", "$(echo x)", "$HOME", "${HOME}", ">", ";", "`cmd`")
+    "shell_fragment",
+    (
+        "&&",
+        "a & command",
+        "|",
+        "$(echo x)",
+        "$HOME",
+        "${HOME}",
+        ">",
+        ";",
+        "`cmd`",
+        "a\ncommand",
+        "a\rcommand",
+    ),
 )
 def test_each_forbidden_shell_form_is_visible(shell_fragment: str) -> None:
     payload = _verification_payload(argv=["pytest", shell_fragment])
@@ -124,6 +138,27 @@ def test_cwd_inside_an_allowed_root_is_accepted(cwd: str) -> None:
         _text(payload), AgentSchema.VERIFICATION_PLAN, _verification_context()
     )
     assert result.policy_rejections == ()
+
+
+def test_cwd_root_prefix_is_checked_on_a_path_boundary() -> None:
+    context = VerificationContext(
+        frozenset({"src"}),
+        frozenset({"pytest"}),
+        frozenset(),
+        frozenset(),
+    )
+    accepted = validate_agent_result(
+        _text(_verification_payload(cwd="src/package")),
+        AgentSchema.VERIFICATION_PLAN,
+        context,
+    )
+    rejected = validate_agent_result(
+        _text(_verification_payload(cwd="srcfoo")),
+        AgentSchema.VERIFICATION_PLAN,
+        context,
+    )
+    assert accepted.policy_rejections == ()
+    assert [item.code for item in rejected.policy_rejections] == ["cwd_outside"]
 
 
 @pytest.mark.parametrize(
@@ -243,6 +278,31 @@ def test_long_acyclic_graph_does_not_depend_on_python_recursion_limit() -> None:
         ],
     )
     validate_agent_result(_text(payload), AgentSchema.GRAPH_BREAKDOWN, GraphContext())
+
+
+def test_large_cycle_keeps_a_bounded_concrete_path_in_retry_feedback() -> None:
+    size = 6_000
+    payload = _graph(
+        tasks=[
+            {"id": f"T{index}", "title": f"Task {index}", "body": "Body"} for index in range(size)
+        ],
+        dependencies=[
+            *({"parent": f"T{index}", "child": f"T{index + 1}"} for index in range(size - 1)),
+            {"parent": f"T{size - 1}", "child": "T0"},
+        ],
+    )
+    with pytest.raises(AgentContractError) as raised:
+        validate_agent_result(_text(payload), AgentSchema.GRAPH_BREAKDOWN, GraphContext())
+    assert len(raised.value.issues) == 1
+    issue = raised.value.issues[0]
+    assert issue.code == "cycle"
+    assert "5969 path node(s) omitted" in issue.message
+    assert "$.tasks[0].id -> $.tasks[1].id" in issue.message
+    assert "$.tasks[5999].id -> $.tasks[0].id" in issue.message
+    feedback = render_retry_feedback(raised.value.issues)
+    assert ": cycle: dependency cycle:" in feedback
+    assert "additional issue(s) omitted" not in feedback
+    assert len(feedback.encode("utf-8")) <= 16_384
 
 
 def _cutoff(scope: dict[str, str] | None = None) -> dict[str, object]:
@@ -419,4 +479,20 @@ def test_non_open_question_reason_and_context_mismatch_are_caller_errors() -> No
             frozenset({PARENT}),
             1,  # type: ignore[arg-type]
             PARENT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("baseline", "parent"),
+    ((BASELINE, None), (None, PARENT)),
+)
+def test_cutoff_context_requires_both_sha_roles_or_neither(
+    baseline: str | None, parent: str | None
+) -> None:
+    with pytest.raises(ValidationContextError):
+        CutoffContext(
+            frozenset(),
+            frozenset({BASELINE, PARENT}),
+            baseline,
+            parent,
         )

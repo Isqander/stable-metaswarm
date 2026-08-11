@@ -26,6 +26,7 @@ from .parse import PayloadParseError, canonical_json_bytes, extract_marked_paylo
 
 MAX_RETRY_ISSUES = 50
 MAX_RETRY_FEEDBACK_BYTES = 16_384
+MAX_CYCLE_DIAGNOSTIC_NODES = 32
 _CLOSED_RESOLUTIONS = frozenset(
     {"verified_fixed", "accepted_reason", "policy_closed", "human_decision"}
 )
@@ -656,7 +657,7 @@ def _validate_decisions(payload: ReviewDecisions, context: DecisionsContext) -> 
     return issues
 
 
-_SHELL_TOKENS = ("&&", "||", "|", "$", ">", "<", ";", "`")
+_SHELL_TOKENS = ("&", "|", "$", ">", "<", ";", "`", "\n", "\r")
 
 
 def _normal_relative_path(value: str) -> str | None:
@@ -777,7 +778,16 @@ def _validate_graph(payload: GraphBreakdown) -> list[ContractIssue]:
     cycle = _find_cycle(payload)
     if cycle is not None:
         task_indexes = {task.id: index for index, task in enumerate(payload.tasks)}
-        cycle_path = " -> ".join(f"$.tasks[{task_indexes[node]}].id" for node in cycle)
+        cycle_nodes = tuple(f"$.tasks[{task_indexes[node]}].id" for node in cycle)
+        if len(cycle_nodes) > MAX_CYCLE_DIAGNOSTIC_NODES:
+            side = MAX_CYCLE_DIAGNOSTIC_NODES // 2
+            omitted = len(cycle_nodes) - side * 2
+            cycle_nodes = (
+                *cycle_nodes[:side],
+                f"... {omitted} path node(s) omitted ...",
+                *cycle_nodes[-side:],
+            )
+        cycle_path = " -> ".join(cycle_nodes)
         issues.append(_issue("cycle", ("dependencies",), f"dependency cycle: {cycle_path}"))
     return issues
 
@@ -990,6 +1000,4 @@ def render_retry_feedback(issues: Iterable[ContractIssue]) -> str:
     omitted = len(lines) - len(selected)
     omitted_line = f"  - {omitted} additional issue(s) omitted.\n" if omitted else ""
     result = header + "".join(selected) + omitted_line + final
-    if len(result.encode("utf-8")) > MAX_RETRY_FEEDBACK_BYTES:
-        raise ValueError("feedback envelope exceeds its byte budget")
     return result

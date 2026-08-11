@@ -48,23 +48,23 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _validate_unicode(value: object) -> None:
-    if isinstance(value, str):
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError as error:
-            raise PayloadParseError(
-                "invalid_unicode",
-                "JSON strings and keys must be valid UTF-8",
-            ) from error
-        return
-    if isinstance(value, list):
-        for item in value:
-            _validate_unicode(item)
-        return
-    if isinstance(value, dict):
-        for key, item in value.items():
-            _validate_unicode(key)
-            _validate_unicode(item)
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            try:
+                item.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise PayloadParseError(
+                    "invalid_unicode",
+                    "JSON strings and keys must be valid UTF-8",
+                ) from error
+        elif isinstance(item, list):
+            pending.extend(item)
+        elif isinstance(item, dict):
+            for key, nested in item.items():
+                pending.append(key)
+                pending.append(nested)
 
 
 def extract_marked_payload(text: str) -> dict[str, object]:
@@ -90,9 +90,6 @@ def extract_marked_payload(text: str) -> dict[str, object]:
         ) from error
     if len(payload_bytes) > MAX_RESULT_BYTES:
         raise PayloadParseError("result_too_large", "marked payload exceeds 1 MiB")
-    if not payload_text.strip():
-        raise PayloadParseError("invalid_json", "marked payload must contain one JSON object")
-
     try:
         parsed = json.loads(
             payload_text,
@@ -104,7 +101,7 @@ def extract_marked_payload(text: str) -> dict[str, object]:
         raise PayloadParseError("duplicate_key", "JSON object keys must be unique") from error
     except _NonFiniteNumberError as error:
         raise PayloadParseError("non_finite_number", "JSON numbers must be finite") from error
-    except (json.JSONDecodeError, RecursionError) as error:
+    except (json.JSONDecodeError, RecursionError, ValueError) as error:
         raise PayloadParseError("invalid_json", "marked payload must be one JSON value") from error
 
     _validate_unicode(parsed)

@@ -158,6 +158,7 @@ def test_reconciliation_is_an_exact_partition_of_raw_ids_without_alias_dedup() -
     (
         (_group(["O-1"], "new"), "missing_title"),
         (_group(["O-1"], "new", title="New", finding_id="F-open"), "unexpected_finding"),
+        (_group(["O-1"], "new", title="New", reason="Because"), "unexpected_reason"),
         (_group(["O-1"], "existing_open", finding_id="F-open", title="Rename"), "unexpected_title"),
         (_group(["O-1"], "existing_open", finding_id="F-fixed"), "finding_scope"),
         (_group(["O-1"], "reaffirmed_closed", finding_id="F-fixed"), "finding_scope"),
@@ -171,6 +172,18 @@ def test_reconciliation_outcome_rules_are_individually_enforced(
     context = _reconciliation_context(frozenset({"O-1"}))
     payload = {"schema": "review.reconciliation.v1", "groups": [group]}
     assert expected in _codes(payload, AgentSchema.REVIEW_RECONCILIATION, context)
+
+
+def test_existing_reconciliation_outcome_requires_finding_before_scope_check() -> None:
+    payload = {
+        "schema": "review.reconciliation.v1",
+        "groups": [_group(["O-1"], "existing_open")],
+    }
+    assert _codes(
+        payload,
+        AgentSchema.REVIEW_RECONCILIATION,
+        _reconciliation_context(frozenset({"O-1"})),
+    ) == {"missing_finding"}
 
 
 @pytest.mark.parametrize(
@@ -215,6 +228,14 @@ def test_dispositions_require_an_exact_set_and_reasons_only_for_non_fixed() -> N
                 {"finding_id": "F-3", "disposition": "wont_fix", "reason": "Accepted cost"},
             ],
             "missing_reason",
+        ),
+        (
+            [
+                {"finding_id": "F-1", "disposition": "fixed", "reason": "Unexpected"},
+                {"finding_id": "F-2", "disposition": "rejected", "reason": "No"},
+                {"finding_id": "F-3", "disposition": "wont_fix", "reason": "No"},
+            ],
+            "unexpected_reason",
         ),
     )
     for dispositions, expected in cases:
@@ -270,6 +291,13 @@ def test_decisions_cover_owner_set_and_validate_pairs_and_followups() -> None:
         ),
         (lambda value: value["decisions"][0].update(decision="accepted_reason"), "decision_pair"),
         (
+            lambda value: (
+                value["decisions"][1].update(decision="verified_fixed"),
+                value["decisions"][1].pop("observation"),
+            ),
+            "decision_pair",
+        ),
+        (
             lambda value: value["decisions"][0].update(
                 decision="verified_fixed",
                 observation={"title": "Closed", "body": "No", "severity_suggested": "high"},
@@ -279,6 +307,10 @@ def test_decisions_cover_owner_set_and_validate_pairs_and_followups() -> None:
         (
             lambda value: value["decisions"][1]["observation"].update(unchanged_from="O-X"),
             "unknown_parent",
+        ),
+        (
+            lambda value: value["decisions"][1]["observation"].update(file="foreign.py"),
+            "unknown_file",
         ),
     )
     for mutate, expected in mutations:
@@ -397,6 +429,14 @@ def test_context_mismatch_and_contradictory_snapshots_are_caller_errors() -> Non
             (),
             frozenset({"src/state.py"}),
         )
+
+
+@pytest.mark.parametrize("maximum", (0, -1, True))
+def test_observation_context_limits_must_be_positive_integers(maximum: object) -> None:
+    with pytest.raises(ValidationContextError):
+        ObservationsContext(frozenset(), maximum)  # type: ignore[arg-type]
+    with pytest.raises(ValidationContextError):
+        DecisionsContext(frozenset(), (), (), frozenset(), maximum)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

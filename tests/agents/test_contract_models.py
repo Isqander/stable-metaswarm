@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from metaswarm.agents import AgentContractError, AgentSchema, validate_agent_result
+from metaswarm.agents import (
+    AgentContractError,
+    AgentSchema,
+    ValidationContextError,
+    validate_agent_result,
+)
 from metaswarm.agents.parse import RESULT_BEGIN, RESULT_END
 from metaswarm.agents.validation import (
     CutoffContext,
@@ -254,6 +259,13 @@ def test_expected_schema_is_checked_before_another_model_can_match() -> None:
     assert [(item.code, item.path) for item in raised.value.issues] == [
         ("schema_mismatch", ("schema",))
     ]
+
+    with pytest.raises(ValidationContextError):
+        validate_agent_result(
+            _text(raw),
+            "review.observations.v1",  # type: ignore[arg-type]
+            context,
+        )
 
 
 def test_contract_boundary_imports_only_pydantic_and_side_effect_free_stdlib() -> None:
