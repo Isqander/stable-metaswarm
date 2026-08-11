@@ -240,7 +240,7 @@ def test_review_package_exports_only_the_t1_4_contract() -> None:
     }
 
 
-def test_review_domain_imports_only_stdlib_and_its_own_model() -> None:
+def test_review_domain_imports_only_declared_stdlib_and_its_own_modules() -> None:
     review_dir = Path(__file__).resolve().parents[3] / "src/metaswarm/domain/review"
     imported_roots: set[str] = set()
     escaping_relative_imports: list[str] = []
@@ -253,7 +253,14 @@ def test_review_domain_imports_only_stdlib_and_its_own_model() -> None:
         imported_roots.update(roots)
         escaping_relative_imports.extend(relative_escapes)
         mutable_globals.extend(globals_)
-    assert imported_roots <= {"__future__", "dataclasses", "typing"}
+    assert imported_roots <= {
+        "__future__",
+        "dataclasses",
+        "hashlib",
+        "json",
+        "typing",
+        "unicodedata",
+    }
     assert imported_roots.isdisjoint(
         {"asyncio", "metaswarm", "sqlite3", "subprocess", "socket", "pathlib"}
     )
