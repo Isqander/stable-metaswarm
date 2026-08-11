@@ -17,11 +17,11 @@ def test_import_comes_from_src_layout() -> None:
     assert Path(metaswarm.__file__).resolve() == PROJECT_ROOT / "src/metaswarm/__init__.py"
 
 
-def test_distribution_metadata_has_no_runtime_dependencies() -> None:
+def test_distribution_metadata_has_exact_runtime_dependency() -> None:
     distribution = metadata.distribution("stable-metaswarm")
 
     assert distribution.version == "0.1.0"
-    assert distribution.requires in (None, [])
+    assert distribution.requires == ["pydantic<2.14,>=2.13"]
 
 
 def test_distribution_owns_only_metaswarm_top_level_package() -> None:
