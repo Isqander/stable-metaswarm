@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -208,13 +209,11 @@ def test_multiple_groups_for_one_human_finding_form_one_ordered_request() -> Non
     "answers",
     (
         (),
-        (HumanReopenAnswer(204, "reopen"), HumanReopenAnswer(204, "keep_closed")),
         (HumanReopenAnswer(999, "reopen"),),
-        (HumanReopenAnswer(204, "other"),),  # type: ignore[arg-type]
     ),
-    ids=("partial", "duplicate", "foreign", "unknown-choice"),
+    ids=("partial", "foreign"),
 )
-def test_invalid_human_answer_set_does_not_complete_or_mutate_pending(
+def test_incomplete_or_foreign_human_answer_does_not_mutate_pending(
     answers: tuple[HumanReopenAnswer, ...],
 ) -> None:
     awaiting = reconcile(
@@ -229,7 +228,33 @@ def test_invalid_human_answer_set_does_not_complete_or_mutate_pending(
         ),
     )
     assert isinstance(awaiting, AwaitHumanReopen)
-    before = awaiting
+    before = deepcopy(awaiting)
+    with pytest.raises(HumanReopenResolutionError):
+        resolve_human_reopens(awaiting, answers)
+    assert awaiting == before
+
+
+@pytest.mark.parametrize(
+    "answers",
+    (
+        (HumanReopenAnswer(204, "reopen"), HumanReopenAnswer(204, "keep_closed")),
+        (HumanReopenAnswer(204, "other"),),  # type: ignore[arg-type]
+    ),
+    ids=("duplicate", "unknown-choice"),
+)
+def test_duplicate_or_unknown_human_answer_is_rejected_in_isolation(
+    answers: tuple[HumanReopenAnswer, ...],
+) -> None:
+    awaiting = reconcile(
+        _input(_observation(1)),
+        (
+            ProposedGroup(
+                ("O-1",), "reopen_closed", finding_id="F-204", reason="One"
+            ),
+        ),
+    )
+    assert isinstance(awaiting, AwaitHumanReopen)
+    before = deepcopy(awaiting)
     with pytest.raises(HumanReopenResolutionError):
         resolve_human_reopens(awaiting, answers)
     assert awaiting == before
@@ -257,6 +282,21 @@ def test_complete_answer_set_resolves_multiple_human_requests_atomically() -> No
         "reaffirmation",
     )
     assert len(ready.finding_rounds) == 1
+
+
+def test_human_reopen_does_not_duplicate_existing_current_round_participation() -> None:
+    awaiting = reconcile(
+        _input(_observation(1), current=frozenset({204})),
+        (
+            ProposedGroup(
+                ("O-1",), "reopen_closed", finding_id="F-204", reason="Returned"
+            ),
+        ),
+    )
+    assert isinstance(awaiting, AwaitHumanReopen)
+    ready = resolve_human_reopens(awaiting, (HumanReopenAnswer(204, "reopen"),))
+    assert tuple(link.link_type for link in ready.links) == ("reopening",)
+    assert ready.finding_rounds == ()
 
 
 @pytest.mark.parametrize(
@@ -299,6 +339,20 @@ def test_context_specific_completion_rejects_the_other_context() -> None:
         derive_fix_check_contribution(discovery)
     with pytest.raises(ReconciliationInputError):
         derive_primary_round_outcome(fix_check)
+
+
+def test_pending_human_result_is_rejected_by_both_completion_functions() -> None:
+    group = ProposedGroup(
+        ("O-1",), "reopen_closed", finding_id="F-204", reason="Returned"
+    )
+    discovery = reconcile(_input(_observation(1)), (group,))
+    fix_check = reconcile(_input(_observation(1), context="fix_check_new"), (group,))
+    assert isinstance(discovery, AwaitHumanReopen)
+    assert isinstance(fix_check, AwaitHumanReopen)
+    with pytest.raises(ReconciliationInputError):
+        derive_primary_round_outcome(discovery)  # type: ignore[arg-type]
+    with pytest.raises(ReconciliationInputError):
+        derive_fix_check_contribution(fix_check)  # type: ignore[arg-type]
 
 
 def test_reconcile_failed_question_preserves_raw_snapshot_without_fallback_intents() -> None:

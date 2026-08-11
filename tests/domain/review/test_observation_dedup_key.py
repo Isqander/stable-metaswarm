@@ -9,6 +9,8 @@ import pytest
 from metaswarm.domain.review.dedup import ObservationFingerprint, observation_dedup_key
 from metaswarm.domain.review.reconcile_model import (
     RECONCILER_REQUIREMENTS,
+    ClosedFindingRef,
+    OpenFindingRef,
     ProposedGroup,
     ReconciliationInput,
     ReconciliationInputError,
@@ -112,7 +114,7 @@ def test_null_file_is_not_an_empty_file_name() -> None:
 @pytest.mark.parametrize(
     "factory",
     (
-        lambda: ObservationFingerprint("high", "Title", "Body", None, 1, None),
+        lambda: ObservationFingerprint("high", "Title", "Body", None, None, 1),
         lambda: ObservationFingerprint("high", "Title", "Body", "a.py", 2, 1),
         lambda: ObservationFingerprint("high", "\ud800", "Body", None, None, None),
     ),
@@ -162,25 +164,51 @@ def test_equal_diagnostic_keys_do_not_merge_raw_observations() -> None:
 
 
 @pytest.mark.parametrize(
-    "value",
+    ("value", "groups"),
     (
-        _input(_observation(1), _observation(2, round_id=11)),
-        _input(_observation(1), _observation(1)),
-        _input(_observation(1), _observation(2, public_id="O-1")),
-        ReconciliationInput(
-            "discovery",
-            10,
-            (_observation(1),),
-            (),
-            (),
-            frozenset({99}),
+        (
+            _input(_observation(1), _observation(2, round_id=11)),
+            (ProposedGroup(("O-1", "O-2"), "new", title="Covered"),),
+        ),
+        (
+            _input(_observation(1), _observation(1, public_id="O-2")),
+            (ProposedGroup(("O-1", "O-2"), "new", title="Covered"),),
+        ),
+        (
+            _input(_observation(1), _observation(2, public_id="O-1")),
+            (ProposedGroup(("O-1",), "new", title="Covered"),),
+        ),
+        (
+            ReconciliationInput(
+                "discovery",
+                10,
+                (_observation(1),),
+                (),
+                (),
+                frozenset({99}),
+            ),
+            (ProposedGroup(("O-1",), "new", title="Covered"),),
         ),
     ),
     ids=("mixed-round", "duplicate-internal-id", "duplicate-public-id", "foreign-round-target"),
 )
 def test_invalid_reconciliation_input_is_rejected_before_proposal(
     value: ReconciliationInput,
+    groups: tuple[ProposedGroup, ...],
 ) -> None:
+    with pytest.raises(ReconciliationInputError):
+        reconcile(value, groups)
+
+
+def test_open_and_closed_ledger_sets_must_not_overlap() -> None:
+    value = ReconciliationInput(
+        "discovery",
+        10,
+        (),
+        (OpenFindingRef(101, "F-101", "Open"),),
+        (ClosedFindingRef(101, "F-201", "Closed", "verified_fixed", "reviewer"),),
+        frozenset(),
+    )
     with pytest.raises(ReconciliationInputError):
         reconcile(value, ())
 

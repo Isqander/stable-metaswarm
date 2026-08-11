@@ -151,9 +151,7 @@ def test_repeated_existing_target_gets_one_round_with_minimum_lane_owner() -> No
         ),
     )
     assert len(result.links) == 2
-    assert result.finding_rounds == (
-        result.finding_rounds[0],
-    )
+    assert len(result.finding_rounds) == 1
     assert result.finding_rounds[0].target == FindingTarget(finding_id=101)
     assert (
         result.finding_rounds[0].owner_lane_id,
@@ -179,10 +177,7 @@ def test_fix_check_contribution_marks_new_identity_with_current_round() -> None:
         ),
     )
     contribution = derive_fix_check_contribution(ready)
-    assert contribution.author_work == (
-        contribution.author_work[0],
-        contribution.author_work[1],
-    )
+    assert len(contribution.author_work) == 2
     assert contribution.author_work[0].target == FindingTarget(finding_id=101)
     assert contribution.author_work[0].first_round_id is None
     assert contribution.author_work[1].target == FindingTarget(new_finding_index=0)
