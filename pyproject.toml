@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Durable orchestrator for CLI agents from multiple vendors"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.13,<2.14",
+]
 
 [dependency-groups]
 dev = [
