@@ -265,7 +265,7 @@ class EscalationBatch:
         policy_snapshots = frozenset(
             (item.severity_threshold, item.policy_version) for item in self.items
         )
-        if len(policy_snapshots) != 1:
+        if self.items and len(policy_snapshots) != 1:
             raise SeverityPolicyError(
                 "invalid_dispute_partition",
                 "escalation batch mixes campaign policy snapshots",

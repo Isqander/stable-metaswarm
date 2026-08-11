@@ -88,6 +88,15 @@ def _inspect_review_source(
     return imported_roots, escaping_relative_imports, mutable_globals
 
 
+def _same_package_imports(source: str) -> frozenset[str]:
+    tree = ast.parse(source)
+    return frozenset(
+        node.module or "<review-package>"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.level == 1
+    )
+
+
 @pytest.mark.parametrize(
     ("current", "event", "expected"),
     ALLOWED_TRANSITIONS,
@@ -274,3 +283,31 @@ def test_review_import_guard_detects_relative_escape() -> None:
 
     assert allowed[1] == []
     assert escaped[1] == ["escaped.py:1"]
+
+
+def test_t1_6_production_imports_only_its_own_model() -> None:
+    review_dir = Path(__file__).resolve().parents[3] / "src/metaswarm/domain/review"
+    expected = {
+        "severity.py": frozenset({"severity_model"}),
+        "severity_model.py": frozenset(),
+    }
+    actual = {
+        name: _same_package_imports((review_dir / name).read_text(encoding="utf-8"))
+        for name in expected
+    }
+    assert actual == expected
+
+
+def test_t1_6_import_guard_detects_t1_4_t1_5_and_package_imports() -> None:
+    assert _same_package_imports("from .severity_model import Severity\n") == frozenset(
+        {"severity_model"}
+    )
+    assert _same_package_imports("from .model import EscalatingDisputes\n") == frozenset(
+        {"model"}
+    )
+    assert _same_package_imports("from .reconcile_model import AwaitHumanReopen\n") == (
+        frozenset({"reconcile_model"})
+    )
+    assert _same_package_imports("from . import AskHuman\n") == frozenset(
+        {"<review-package>"}
+    )

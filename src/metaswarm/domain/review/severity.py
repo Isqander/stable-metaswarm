@@ -128,8 +128,7 @@ def resolve_effective_severity(
             observation_id=parent.observation_id,
         )
     if (
-        target.period_start_event_id is None
-        or parent.period_start_event_id != target.period_start_event_id
+        parent.period_start_event_id != target.period_start_event_id
         or not _is_positive_int(target.period_start_event_id)
         or parent.link_event_id < target.period_start_event_id
     ):
@@ -364,11 +363,7 @@ def derive_severity_snapshot(facts: SeverityFacts) -> SeveritySnapshot:
             closing_events,
         )
         if override_period_start is None:
-            raise _facts_error(
-                "invalid_override",
-                "an override cannot be applied while the severity period is closed",
-                finding_id=facts.finding_id,
-            )
+            continue
         previous = next(
             (
                 previous_override
@@ -470,7 +465,6 @@ def evaluate_disputes(
             or not isinstance(candidate.severity, SeveritySnapshot)
             or candidate.severity.finding_id != candidate.finding_id
             or not _is_positive_int(candidate.severity.period_start_event_id)
-            or candidate.severity.escalation_severity is None
         ):
             raise _policy_error(
                 "candidate is outside the open insists policy scope",
@@ -513,12 +507,4 @@ def evaluate_disputes(
         EscalationBatch(ordered_escalating) if ordered_escalating else None,
         tuple(sorted(closures, key=lambda item: item.finding_id)),
     )
-    output_ids = frozenset(item.finding_id for item in result.policy_closures)
-    if result.escalating is not None:
-        output_ids = output_ids.union(item.finding_id for item in result.escalating.items)
-    if output_ids != frozenset(seen):
-        raise SeverityPolicyError(
-            "invalid_dispute_partition",
-            "dispute partition lost or invented a finding",
-        )
     return result

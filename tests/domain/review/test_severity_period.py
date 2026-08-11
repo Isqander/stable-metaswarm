@@ -217,6 +217,17 @@ def test_observation_in_the_override_event_is_not_ordered_after_the_override() -
     assert snapshot == SeveritySnapshot(1, 10, "medium", "critical")
 
 
+def test_old_severity_validation_excludes_observations_from_the_override_event() -> None:
+    snapshot = derive_severity_snapshot(
+        _facts(
+            _link(1, 10, "medium"),
+            _link(2, 20, "critical", link_type="recurrence"),
+            overrides=(_override(20, "medium", "low"),),
+        )
+    )
+    assert snapshot == SeveritySnapshot(1, 10, "low", "critical")
+
+
 @pytest.mark.parametrize(
     ("links", "expected"),
     (
@@ -284,6 +295,55 @@ def test_multiple_overrides_in_one_period_validate_as_a_chain() -> None:
     assert snapshot == SeveritySnapshot(1, 10, "high", "critical")
 
 
+def test_last_override_wins_when_no_later_observation_exists() -> None:
+    snapshot = derive_severity_snapshot(
+        _facts(
+            _link(1, 10, "critical"),
+            overrides=(
+                _override(20, "critical", "high"),
+                _override(30, "high", "low"),
+            ),
+        )
+    )
+    assert snapshot == SeveritySnapshot(1, 10, "low", "critical")
+
+
+def test_last_closing_resolution_defines_the_current_period() -> None:
+    snapshot = derive_severity_snapshot(
+        _facts(
+            _link(1, 10, "low"),
+            _link(2, 30, "high", link_type="reopening"),
+            _link(3, 50, "medium", link_type="reopening"),
+            resolutions=(
+                _resolution(20, "verified_fixed"),
+                _resolution(40, "human_decision"),
+            ),
+        )
+    )
+    assert snapshot == SeveritySnapshot(1, 50, "medium", "high")
+
+
+def test_override_outside_an_open_period_is_ignored_like_the_sql_view() -> None:
+    snapshot = derive_severity_snapshot(
+        _facts(
+            _link(1, 10, "high"),
+            resolutions=(_resolution(20, "verified_fixed"),),
+            overrides=(_override(30, "low", "critical"),),
+        )
+    )
+    assert snapshot == SeveritySnapshot(1, None, None, "high")
+
+
+def test_historical_max_never_includes_even_an_increasing_override() -> None:
+    snapshot = derive_severity_snapshot(
+        _facts(
+            _link(1, 10, "low"),
+            overrides=(_override(20, "low", "critical"),),
+        )
+    )
+    assert snapshot == SeveritySnapshot(1, 10, "critical", "low")
+
+
 @pytest.mark.parametrize(
     ("facts", "code"),
     (
@@ -306,6 +366,15 @@ def test_multiple_overrides_in_one_period_validate_as_a_chain() -> None:
             _facts(
                 _link(1, 10, "low"),
                 resolutions=(
+                    _resolution(20, "verified_fixed", finding_id=2),
+                ),
+            ),
+            "invalid_facts",
+        ),
+        (
+            _facts(
+                _link(1, 10, "low"),
+                resolutions=(
                     _resolution(20, "verified_fixed", authority="human"),
                 ),
             ),
@@ -319,6 +388,7 @@ def test_multiple_overrides_in_one_period_validate_as_a_chain() -> None:
         "duplicate-observation",
         "nonpositive-event",
         "conflicting-boundary",
+        "foreign-resolution-finding",
         "resolution-effect-mismatch",
     ),
 )
@@ -341,21 +411,14 @@ def test_structurally_invalid_facts_never_return_a_partial_snapshot(
             _override(20, "critical", "medium"),
             _override(20, "medium", "low"),
         ),
-        (_override(30, "critical", "medium"),),
     ),
-    ids=("empty-reason", "wrong-old", "unknown-new", "duplicate-event", "closed-period"),
+    ids=("empty-reason", "wrong-old", "unknown-new", "duplicate-event"),
 )
 def test_invalid_override_is_rejected_by_its_own_rule(
     overrides: tuple[SeverityOverrideFact, ...],
 ) -> None:
-    resolutions = (
-        (_resolution(20, "verified_fixed"),)
-        if len(overrides) == 1 and overrides[0].event_id == 30
-        else ()
-    )
     facts = _facts(
         _link(1, 10, "critical"),
-        resolutions=resolutions,
         overrides=overrides,
     )
     with pytest.raises(SeverityFactsError) as raised:
