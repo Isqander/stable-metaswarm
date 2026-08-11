@@ -378,13 +378,10 @@ def derive_severity_snapshot(facts: SeverityFacts) -> SeveritySnapshot:
             previous,
             override.event_id,
         )
-        # SQLite orders the cutoff strictly after the override.  When the
-        # override shares the opening event, there is no earlier severity in
-        # this period to validate; the row itself becomes the initial value.
-        boundary_override = override.event_id == override_period_start
-        if (expected_old is None and not boundary_override) or (
-            expected_old is not None and override.old_severity != expected_old
-        ):
+        # SQLite permits an open period before its first linked observation.
+        # Without an earlier projected severity there is nothing to validate;
+        # this override becomes the period's initial value.
+        if expected_old is not None and override.old_severity != expected_old:
             raise _facts_error(
                 "invalid_override",
                 "override old severity does not match escalation before its event",

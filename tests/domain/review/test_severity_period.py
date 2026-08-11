@@ -158,6 +158,13 @@ def _facts(
         ),
         (
             _facts(
+                _link(1, 30, "low"),
+                overrides=(_override(20, "critical", "high"),),
+            ),
+            SeveritySnapshot(1, 10, "high", "low"),
+        ),
+        (
+            _facts(
                 _link(1, 10, "high"),
                 resolutions=(_resolution(20, "verified_fixed"),),
                 overrides=(_override(30, "low", "critical"),),
@@ -175,6 +182,7 @@ def _facts(
         "post-override-high-grows-again",
         "override-at-first-seen-is-the-initial-value",
         "override-at-reopening-is-the-initial-value",
+        "override-before-first-linked-observation-is-the-initial-value",
         "override-outside-an-open-period-is-audit-only",
     ),
 )
