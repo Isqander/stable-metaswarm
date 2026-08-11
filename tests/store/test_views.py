@@ -623,6 +623,12 @@ def test_override_and_resolution_event_uniqueness_keep_last_override_single_valu
                 )
             )
             assert "seq" not in columns
+            resolution_columns = await database.read(
+                lambda db: tuple(
+                    row["name"] for row in db.fetch_all("PRAGMA table_info(finding_resolution)")
+                )
+            )
+            assert "seq" not in resolution_columns
         finally:
             await database.close()
 
