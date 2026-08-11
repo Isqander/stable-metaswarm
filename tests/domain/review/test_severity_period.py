@@ -140,6 +140,30 @@ def _facts(
             ),
             SeveritySnapshot(1, 10, "high", "critical"),
         ),
+        (
+            _facts(
+                _link(1, 10, "high"),
+                overrides=(_override(10, "low", "medium"),),
+            ),
+            SeveritySnapshot(1, 10, "medium", "high"),
+        ),
+        (
+            _facts(
+                _link(1, 10, "high"),
+                _link(2, 30, "low", link_type="reopening"),
+                resolutions=(_resolution(20, "verified_fixed"),),
+                overrides=(_override(30, "high", "medium"),),
+            ),
+            SeveritySnapshot(1, 30, "medium", "high"),
+        ),
+        (
+            _facts(
+                _link(1, 10, "high"),
+                resolutions=(_resolution(20, "verified_fixed"),),
+                overrides=(_override(30, "low", "critical"),),
+            ),
+            SeveritySnapshot(1, None, None, "high"),
+        ),
     ),
     ids=(
         "first-seen",
@@ -149,6 +173,9 @@ def _facts(
         "verified-without-reopen-closes-period",
         "override-cuts-off-old-critical",
         "post-override-high-grows-again",
+        "override-at-first-seen-is-the-initial-value",
+        "override-at-reopening-is-the-initial-value",
+        "override-outside-an-open-period-is-audit-only",
     ),
 )
 def test_normative_period_boundary_sequences(
@@ -321,17 +348,6 @@ def test_last_closing_resolution_defines_the_current_period() -> None:
         )
     )
     assert snapshot == SeveritySnapshot(1, 50, "medium", "high")
-
-
-def test_override_outside_an_open_period_is_ignored_like_the_sql_view() -> None:
-    snapshot = derive_severity_snapshot(
-        _facts(
-            _link(1, 10, "high"),
-            resolutions=(_resolution(20, "verified_fixed"),),
-            overrides=(_override(30, "low", "critical"),),
-        )
-    )
-    assert snapshot == SeveritySnapshot(1, None, None, "high")
 
 
 def test_historical_max_never_includes_even_an_increasing_override() -> None:

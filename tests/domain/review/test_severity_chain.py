@@ -153,6 +153,12 @@ def test_unchanged_from_inherits_the_direct_parent_and_supports_multi_hop() -> N
         ),
         (
             ObservationSeverityInput(None, 1),
+            _target(period_start_event_id=None),
+            _parent(period_start_event_id=None),
+            "scope_or_period_mismatch",
+        ),
+        (
+            ObservationSeverityInput(None, 1),
             _target(period_start_event_id=100),
             _parent(link_event_id=99),
             "scope_or_period_mismatch",
@@ -166,6 +172,7 @@ def test_unchanged_from_inherits_the_direct_parent_and_supports_multi_hop() -> N
         "foreign-finding",
         "foreign-period",
         "closed-target-period",
+        "closed-parent-and-target-period",
         "parent-before-period",
     ),
 )
