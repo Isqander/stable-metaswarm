@@ -77,7 +77,7 @@ def _facts(
     ),
     ids=("clean", "dispute", "revision", "cap"),
 )
-def test_four_decision_branches_have_normative_priority(
+def test_four_decision_branches_cover_clean_and_three_competing_paths(
     facts: CheckFacts,
     expected_type: type[object],
     expected_reason: str | None,

@@ -98,7 +98,7 @@ def test_unknown_campaign_state_or_event_is_rejected(current: object, event: obj
     assert (raised.value.current, raised.value.event) == (current, event)
 
 
-def test_transition_pairs_match_migration_seed_and_never_initialize_discovery() -> None:
+def test_event_transitions_collapse_to_nine_normative_pairs_without_initialization() -> None:
     pairs = {(current, expected) for current, _, expected in ALLOWED_TRANSITIONS}
     assert pairs == {
         ("discovery", "reconciliation"),
@@ -216,6 +216,7 @@ def test_review_package_exports_only_the_t1_4_contract() -> None:
 def test_review_domain_imports_only_stdlib_and_its_own_model() -> None:
     review_dir = Path(__file__).resolve().parents[3] / "src/metaswarm/domain/review"
     imported_roots: set[str] = set()
+    escaping_relative_imports: list[str] = []
     mutable_globals: list[str] = []
     for path in review_dir.glob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -230,10 +231,14 @@ def test_review_domain_imports_only_stdlib_and_its_own_model() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 imported_roots.update(alias.name.split(".", 1)[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                imported_roots.add(node.module.split(".", 1)[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.level >= 2:
+                    escaping_relative_imports.append(f"{path.name}:{node.lineno}")
+                elif node.level == 0 and node.module:
+                    imported_roots.add(node.module.split(".", 1)[0])
     assert imported_roots <= {"__future__", "dataclasses", "typing"}
     assert imported_roots.isdisjoint(
         {"asyncio", "metaswarm", "sqlite3", "subprocess", "socket", "pathlib"}
     )
+    assert escaping_relative_imports == []
     assert mutable_globals == []

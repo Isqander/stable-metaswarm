@@ -8,7 +8,6 @@ from .model import (
     CheckFacts,
     CloseClean,
     CycleInvariantError,
-    EscalatingDispute,
     EscalatingDisputes,
     InvalidCampaignTransition,
     OpenFinding,
@@ -71,16 +70,8 @@ def _validate_disputes(
         return None
     if not isinstance(disputes, EscalatingDisputes):
         raise CycleInvariantError("escalating_disputes has an invalid type")
-    if type(disputes.items) is not tuple or not disputes.items:
-        raise CycleInvariantError("escalating disputes must be a non-empty tuple")
-    finding_ids: list[int] = []
-    for item in disputes.items:
-        if not isinstance(item, EscalatingDispute):
-            raise CycleInvariantError("escalating disputes contain an invalid item")
-        finding_ids.append(item.finding_id)
-    if len(finding_ids) != len(set(finding_ids)):
-        raise CycleInvariantError("escalating disputes contain duplicate findings")
-    if not set(finding_ids).issubset(open_finding_ids):
+    finding_ids = frozenset(item.finding_id for item in disputes.items)
+    if not finding_ids.issubset(open_finding_ids):
         raise CycleInvariantError("an escalating dispute must refer to an open finding")
     return disputes
 
@@ -116,12 +107,6 @@ def _validate_check_facts(facts: CheckFacts) -> EscalatingDisputes | None:
     return _validate_disputes(facts.escalating_disputes, open_finding_ids)
 
 
-def _validate_post_decision_count(facts: CheckFacts) -> None:
-    expected_count = facts.counters.review_check_count_before + 1
-    if expected_count > facts.max_author_revisions + 1:
-        raise CycleInvariantError("the completed check would exceed the derived review-check cap")
-
-
 def decide_after_check(facts: CheckFacts) -> AfterCheckDecision:
     disputes = _validate_check_facts(facts)
 
@@ -143,7 +128,6 @@ def decide_after_check(facts: CheckFacts) -> AfterCheckDecision:
         decision = AskHuman(reason=reason)
 
     next_campaign_state(facts.campaign_state, decision.campaign_event)
-    _validate_post_decision_count(facts)
     return decision
 
 

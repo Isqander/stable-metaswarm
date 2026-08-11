@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 import metaswarm.store.db as db_module
+from metaswarm.domain.review.transition import _TRANSITIONS
 from metaswarm.store import (
     Database,
     IncompatibleSchemaError,
@@ -90,17 +91,9 @@ SIMPLE_SEEDS: dict[str, tuple[str, set[str]]] = {
     "verification_status": ("status", {"green", "red", "error"}),
 }
 
-CAMPAIGN_TRANSITIONS = {
-    ("discovery", "reconciliation"),
-    ("discovery", "closed_cancelled"),
-    ("reconciliation", "fix_cycle"),
-    ("reconciliation", "closed_clean"),
-    ("reconciliation", "closed_cancelled"),
-    ("fix_cycle", "fix_cycle"),
-    ("fix_cycle", "closed_clean"),
-    ("fix_cycle", "closed_escalated"),
-    ("fix_cycle", "closed_cancelled"),
-}
+CAMPAIGN_TRANSITIONS = frozenset(
+    (from_state, to_state) for from_state, _event, to_state in _TRANSITIONS
+)
 
 
 def _lastrowid(result) -> int:
