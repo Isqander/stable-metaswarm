@@ -254,6 +254,10 @@ def test_dispute_must_belong_to_the_open_set() -> None:
     "factory",
     (
         lambda: EscalatingDisputes(()),
+        lambda: EscalatingDisputes(  # type: ignore[arg-type]
+            [EscalatingDispute(1, "high", "high", "v1")]
+        ),
+        lambda: EscalatingDisputes((object(),)),  # type: ignore[arg-type]
         lambda: EscalatingDisputes(
             (
                 EscalatingDispute(1, "high", "high", "v1"),
@@ -261,9 +265,9 @@ def test_dispute_must_belong_to_the_open_set() -> None:
             )
         ),
     ),
-    ids=("empty", "duplicate-finding"),
+    ids=("empty", "non-tuple-items", "invalid-item", "duplicate-finding"),
 )
-def test_empty_or_duplicate_dispute_snapshot_is_rejected(factory: object) -> None:
+def test_invalid_dispute_snapshot_is_rejected(factory: object) -> None:
     with pytest.raises(CycleInvariantError):
         factory()  # type: ignore[operator]
 

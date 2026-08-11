@@ -61,6 +61,33 @@ FORBIDDEN_TRANSITIONS = tuple(
 )
 
 
+def _inspect_review_source(
+    source: str,
+    source_name: str,
+) -> tuple[set[str], list[str], list[str]]:
+    tree = ast.parse(source)
+    imported_roots: set[str] = set()
+    escaping_relative_imports: list[str] = []
+    mutable_globals: list[str] = []
+    for node in tree.body:
+        value = None
+        if isinstance(node, ast.Assign):
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            value = node.value
+        if isinstance(value, (ast.List, ast.Dict, ast.Set)):
+            mutable_globals.append(f"{source_name}:{node.lineno}")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_roots.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level >= 2:
+                escaping_relative_imports.append(f"{source_name}:{node.lineno}")
+            elif node.level == 0 and node.module:
+                imported_roots.add(node.module.split(".", 1)[0])
+    return imported_roots, escaping_relative_imports, mutable_globals
+
+
 @pytest.mark.parametrize(
     ("current", "event", "expected"),
     ALLOWED_TRANSITIONS,
@@ -219,26 +246,24 @@ def test_review_domain_imports_only_stdlib_and_its_own_model() -> None:
     escaping_relative_imports: list[str] = []
     mutable_globals: list[str] = []
     for path in review_dir.glob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in tree.body:
-            value = None
-            if isinstance(node, ast.Assign):
-                value = node.value
-            elif isinstance(node, ast.AnnAssign):
-                value = node.value
-            if isinstance(value, (ast.List, ast.Dict, ast.Set)):
-                mutable_globals.append(f"{path.name}:{node.lineno}")
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported_roots.update(alias.name.split(".", 1)[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                if node.level >= 2:
-                    escaping_relative_imports.append(f"{path.name}:{node.lineno}")
-                elif node.level == 0 and node.module:
-                    imported_roots.add(node.module.split(".", 1)[0])
+        roots, relative_escapes, globals_ = _inspect_review_source(
+            path.read_text(encoding="utf-8"),
+            path.name,
+        )
+        imported_roots.update(roots)
+        escaping_relative_imports.extend(relative_escapes)
+        mutable_globals.extend(globals_)
     assert imported_roots <= {"__future__", "dataclasses", "typing"}
     assert imported_roots.isdisjoint(
         {"asyncio", "metaswarm", "sqlite3", "subprocess", "socket", "pathlib"}
     )
     assert escaping_relative_imports == []
     assert mutable_globals == []
+
+
+def test_review_import_guard_detects_relative_escape() -> None:
+    allowed = _inspect_review_source("from .model import CheckFacts\n", "allowed.py")
+    escaped = _inspect_review_source("from ...store import Database\n", "escaped.py")
+
+    assert allowed[1] == []
+    assert escaped[1] == ["escaped.py:1"]
